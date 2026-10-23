@@ -1,0 +1,5 @@
+{
+  "enabled": {"description": "采集模型用量", "type": "bool", "default": true},
+  "prices_json": {"description": "模型价格规则 JSON", "type": "text", "default": "[]", "hint": "可在插件统计页面直接编辑。每百万 token 的价格，未配置时费用显示未知。"},
+  "history_days": {"description": "首次读取宿主历史统计的天数", "type": "int", "default": 365}
+}

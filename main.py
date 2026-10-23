@@ -1,0 +1,210 @@
+"""AstrBot usage dashboard; all metrics remain local and outside chat history."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from datetime import datetime, timezone
+from sys import maxsize
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from astrbot.api import AstrBotConfig
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, StarTools
+from astrbot.api.web import error_response, json_response, request
+from astrbot.core import db_helper
+from astrbot.core.db.po import ProviderStat
+from sqlmodel import select
+
+from .capture import Collector
+from .ledger import KINDS, Ledger, prices_from_json
+
+
+class UsageInsight(Star):
+    def __init__(self, context: Context, config: AstrBotConfig):
+        super().__init__(context, config)
+        self.config = config
+        directory = StarTools.get_data_dir("astrbot_plugin_usage_insight")
+        directory.mkdir(parents=True, exist_ok=True)
+        self.ledger = Ledger(directory / "usage.sqlite3")
+        self.collector = Collector(
+            self.ledger, lambda: self.config.get("enabled", True), self.logger
+        )
+        self._import_task = None
+        self.import_status = "pending"
+        for path, handler, methods in (
+            ("report", self.api_report, ["GET"]),
+            ("prices", self.api_prices, ["GET", "POST"]),
+        ):
+            context.register_web_api(
+                "/astrbot_plugin_usage_insight/" + path,
+                handler,
+                methods,
+                "Usage and cost estimates",
+            )
+
+    async def initialize(self):
+        self.collector.refresh(self.context.get_all_providers())
+        self._import_task = asyncio.create_task(self.import_history())
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize)
+    async def bind_message(self, event: AstrMessageEvent):
+        self.collector.bind_event(event)
+
+    @filter.on_llm_request(priority=maxsize)
+    async def bind_request(self, event: AstrMessageEvent, req):
+        self.collector.bind_event(event)
+        self.collector.refresh(self.context.get_all_providers())
+
+    @filter.on_plugin_loaded()
+    async def refresh_integrations(self, plugin):
+        self.collector.refresh(self.context.get_all_providers())
+
+    async def import_history(self):
+        """Import only pre-installation host stats; a host row is one agent turn."""
+        try:
+            cutoff = datetime.fromtimestamp(self.ledger.started, timezone.utc).replace(
+                tzinfo=None
+            )
+            days = max(1, min(36500, int(self.config.get("history_days", 365))))
+            begin = datetime.fromtimestamp(
+                self.ledger.started - days * 86400, timezone.utc
+            ).replace(tzinfo=None)
+            offset = 0
+            while True:
+                async with db_helper.get_db() as session:
+                    records = (
+                        (
+                            await session.execute(
+                                select(ProviderStat)
+                                .where(
+                                    ProviderStat.created_at < cutoff,
+                                    ProviderStat.created_at >= begin,
+                                )
+                                .order_by(ProviderStat.id)
+                                .offset(offset)
+                                .limit(500)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                for record in records:
+                    date = record.created_at
+                    if date.tzinfo is None:
+                        date = date.replace(tzinfo=timezone.utc)
+                    input_count = record.token_input_other + record.token_input_cached
+                    # Historical zero cannot establish whether cache reporting
+                    # was supported, or whether a failed call was actually free.
+                    usage = (
+                        {
+                            "input": input_count,
+                            "cached": record.token_input_cached
+                            if record.token_input_cached > 0
+                            else None,
+                            "output": record.token_output,
+                        }
+                        if input_count or record.token_output
+                        else None
+                    )
+                    row = {
+                        "ts": date.timestamp(),
+                        "provider": record.provider_id or "unknown",
+                        "model": record.provider_model or "unknown",
+                        "kind": "history",
+                        "origin": record.umo or "",
+                        "actor": None,
+                        "participants": [],
+                        "unit": "turn",
+                        "status": record.status,
+                        "duration": max(0, record.end_time - record.start_time),
+                        "usage": usage,
+                        "error": "",
+                    }
+                    self.ledger.put(row, "native:" + str(record.id), commit=False)
+                self.ledger.db.commit()
+                if len(records) < 500:
+                    break
+                offset += len(records)
+                await asyncio.sleep(0)
+            self.import_status = "complete"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.import_status = "failed"
+            self.logger.warning(
+                "Historical usage import failed: %s", type(exc).__name__
+            )
+
+    def _timezone(self):
+        value = (
+            self.context.get_config().get("timezone", "Asia/Shanghai")
+            or "Asia/Shanghai"
+        )
+        try:
+            ZoneInfo(value)
+            return value
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            return "Asia/Shanghai"
+
+    async def api_report(self):
+        try:
+            rules = prices_from_json(self.config.get("prices_json", "[]"))
+            query = request.query
+            result = await asyncio.to_thread(
+                self.ledger.report,
+                rules,
+                days=int(query.get("days", 7)),
+                timezone=self._timezone(),
+                provider=str(query.get("provider", "")),
+                model=str(query.get("model", "")),
+                kind=str(query.get("kind", "")),
+                origin=str(query.get("origin", "")),
+                actor=str(query.get("actor", "")),
+                attribution=str(query.get("attribution", "trigger")),
+                offset=int(query.get("offset", 0)),
+                limit=int(query.get("limit", 50)),
+            )
+            result.update(
+                import_status=self.import_status,
+                kind_labels=KINDS,
+                collecting=bool(self.config.get("enabled", True)),
+                generated_at=time.time(),
+            )
+            return json_response(result)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return error_response(
+                "查询参数或价格规则无效，请检查插件配置", status_code=400
+            )
+
+    async def api_prices(self):
+        try:
+            if request.method == "POST":
+                payload = await request.json()
+                if not isinstance(payload, dict) or set(payload) != {"prices"}:
+                    raise ValueError("请提交 prices 数组")
+                rules = prices_from_json(payload["prices"])
+                old = self.config.get("prices_json", "[]")
+                self.config["prices_json"] = json.dumps(rules, ensure_ascii=False)
+                try:
+                    self.config.save_config()
+                except Exception:
+                    self.config["prices_json"] = old
+                    raise
+            else:
+                rules = prices_from_json(self.config.get("prices_json", "[]"))
+            return json_response({"prices": rules})
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return error_response(str(exc), status_code=400)
+        except Exception:
+            return error_response("价格保存失败，请重试", status_code=500)
+
+    async def terminate(self):
+        if self._import_task is not None and not self._import_task.done():
+            self._import_task.cancel()
+            try:
+                await self._import_task
+            except asyncio.CancelledError:
+                pass
+        self.collector.stop()
