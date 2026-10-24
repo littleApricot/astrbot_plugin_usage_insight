@@ -74,7 +74,7 @@ class Collector:
                     row = {**row, "price_snapshot": snapshot}
             self.ledger.put(row)
         except Exception as exc:
-            self.logger.warning("Usage receipt save failed: %s", type(exc).__name__)
+            self.logger.warning("模型用量回执保存失败：%s", type(exc).__name__)
 
     def _patch(self, owner, name, wrapper):
         original = getattr(owner, name)

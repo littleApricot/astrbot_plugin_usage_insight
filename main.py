@@ -274,9 +274,7 @@ class UsageInsight(Star):
             raise
         except Exception as exc:
             self.import_status = "failed"
-            self.logger.warning(
-                "Historical usage import failed: %s", type(exc).__name__
-            )
+            self.logger.warning("历史模型用量导入失败：%s", type(exc).__name__)
 
     def _timezone(self):
         value = (
