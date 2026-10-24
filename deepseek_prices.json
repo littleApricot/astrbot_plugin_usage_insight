@@ -1,0 +1,31 @@
+{
+  "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+  "observed_at": "2026-10-24T08:47:16.598997+00:00",
+  "currency": "CNY",
+  "models": {
+    "deepseek-flash": {
+      "peak": {
+        "cached": "0.04",
+        "input": "2",
+        "output": "8"
+      },
+      "off_peak": {
+        "cached": "0.02",
+        "input": "1",
+        "output": "4"
+      }
+    },
+    "deepseek-v4-pro": {
+      "peak": {
+        "cached": "0.30",
+        "input": "9.0",
+        "output": "27.0"
+      },
+      "off_peak": {
+        "cached": "0.15",
+        "input": "4.5",
+        "output": "13.5"
+      }
+    }
+  }
+}

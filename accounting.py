@@ -159,7 +159,17 @@ def caller_metadata():
         del frame
 
 
-def receipt(metadata, provider, model, start, usage, status="completed", error=""):
+def receipt(
+    metadata,
+    provider,
+    model,
+    start,
+    usage,
+    status="completed",
+    error="",
+    *,
+    api_host=None,
+):
     return {
         **metadata,
         "provider": str(provider),
@@ -170,4 +180,5 @@ def receipt(metadata, provider, model, start, usage, status="completed", error="
         "status": status,
         "error": error,
         "unit": "call",
+        **({"api_host": api_host} if api_host is not None else {}),
     }

@@ -32,7 +32,14 @@ schema = json.loads(
 config = AstrBotConfig(str(root / "config.json"), schema=schema)
 context = SimpleNamespace(
     register_web_api=register,
-    get_all_providers=lambda: [],
+    get_all_providers=lambda: [
+        SimpleNamespace(
+            provider_config={
+                "id": "test-deepseek",
+                "api_base": "https://api.deepseek.com/v1",
+            }
+        )
+    ],
     get_config=lambda: {"timezone": "Asia/Shanghai"},
 )
 with patch(
@@ -48,15 +55,17 @@ for i in range(125):
     plugin.ledger.put(
         {
             "ts": time.time() - (i % 7) * 86400,
-            "provider": "test-provider",
-            "model": "test-model",
-            "kind": ["reply", "decision", "memory", "recognition"][i % 4],
+            "provider": "test-deepseek" if i in (1, 2) else "test-provider",
+            "model": "deepseek-flash" if i in (1, 2) else "test-model",
+            "kind": "history"
+            if i == 2
+            else ["reply", "decision", "memory", "recognition"][i % 4],
             "origin": "qq:GroupMessage:synthetic-group",
             "actor": person if i % 4 < 2 else None,
             "participants": [person, {"id": "qq:test-peer", "name": "测试同伴"}]
             if i % 4 < 2
             else [],
-            "unit": "call",
+            "unit": "turn" if i == 2 else "call",
             "status": "completed" if i % 11 else "error",
             "duration": 1.25,
             "usage": {"input": 1000 + i * 10, "cached": 800, "output": 100}

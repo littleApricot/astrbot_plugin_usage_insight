@@ -32,9 +32,15 @@ try{
  const html=await readFile('pages/usage/index.html','utf8');
  await page.setContent(html.replace('<head>','<head>'+bridge));
  await page.waitForFunction(()=>document.getElementById('status').textContent===''&&document.querySelectorAll('#people tr').length>0);
- assert.equal(await page.locator('#cost').innerText(),'未知');
+ assert.match(await page.locator('#cost').innerText(),/CNY/);
+ assert.match(await page.locator('#cost-coverage').innerText(),/未匹配价格/);
+ assert.match(await page.locator('#people').innerText(),/宿主历史（未记录用户）/);
  assert.equal(await page.locator('#recent tr').count(),50);
  await page.locator('#price-open').click();await page.locator('#price-dialog').waitFor({state:'visible'});
+ assert.equal(await page.locator('#auto-prices tr').count(),4);
+ assert.match(await page.locator('#auto-price-status').innerText(),/已识别 1 个/);
+ assert.equal(await page.locator('#price-rows tr').count(),1);
+ await page.screenshot({path:'/private/tmp/usage-insight-prices.png'});
  for(const [key,value] of Object.entries({input:'2',cached:'.2',output:'3'}))await page.locator(`[data-field="${key}"]`).fill(value);
  await page.locator('#price-save').click();await page.waitForFunction(()=>document.getElementById('price-status').textContent.includes('已保存')&&document.getElementById('cost').textContent.includes('CNY'));
  await page.locator('#price-close').click();
@@ -50,7 +56,7 @@ try{
  await page.setViewportSize({width:390,height:844});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));assert.equal(await page.locator('h1').count(),1);await page.screenshot({path:'/private/tmp/usage-insight-mobile.png'});await page.locator('#people').scrollIntoViewIfNeeded();await page.screenshot({path:'/private/tmp/usage-insight-mobile-people.png'});
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
  assert.deepEqual(errors,[]);
- console.log(JSON.stringify({loaded:true,unknownPrices:true,savePrices:true,attribution:true,personFilter:true,sharedFilter:true,pagination:true,mobileNoOverflow:true,scriptErrors:errors,apiTransport:'in-process ASGI over pipes'}));
+ console.log(JSON.stringify({loaded:true,automaticOfficialPrices:true,priceReasons:true,separateHistoricalAttribution:true,saveOverrides:true,attribution:true,personFilter:true,sharedFilter:true,pagination:true,mobileNoOverflow:true,scriptErrors:errors,apiTransport:'in-process ASGI over pipes'}));
 }finally{
  if(browser)await browser.close();
  lines.close();python.stdin.end();if(python.exitCode===null&&python.signalCode===null){const exited=new Promise(resolve=>python.once('exit',resolve));python.kill('SIGTERM');await exited;}await rm(runtime,{recursive:true,force:true});

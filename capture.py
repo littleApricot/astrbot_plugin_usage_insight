@@ -19,6 +19,7 @@ from .accounting import (
     response_usage,
     usage_from_raw,
 )
+from .pricing import api_host
 
 BOUND = ContextVar("usage_insight_bound", default=None)
 DEPTH = ContextVar("usage_insight_depth", default=0)
@@ -27,6 +28,13 @@ DEPTH = ContextVar("usage_insight_depth", default=0)
 def metadata():
     found = caller_metadata()
     bound = BOUND.get()
+    if found["kind"] == "decision" and not found.get("actor"):
+        if bound is not None and bound.get("active", True):
+            if not found.get("origin") or found["origin"] == bound.get("origin"):
+                return {
+                    **{k: v for k, v in bound.items() if k != "active"},
+                    "kind": "decision",
+                }
     if found["kind"] != "other" or found.get("actor"):
         return found
     if bound is not None and bound.get("active", True):
@@ -35,10 +43,11 @@ def metadata():
 
 
 class Collector:
-    def __init__(self, ledger, enabled, logger):
+    def __init__(self, ledger, enabled, logger, price_snapshot=None):
         self.ledger, self.enabled, self.logger = ledger, enabled, logger
         self.patches = []
         self.stopped, self.inflight = False, 0
+        self.price_snapshot = price_snapshot
 
     def bind_event(self, event):
         previous = event.get_extra("usage_insight_scope")
@@ -58,6 +67,10 @@ class Collector:
 
     def write(self, row):
         try:
+            if self.price_snapshot is not None:
+                snapshot = self.price_snapshot(row)
+                if snapshot is not None:
+                    row = {**row, "price_snapshot": snapshot}
             self.ledger.put(row)
         except Exception as exc:
             self.logger.warning("Usage receipt save failed: %s", type(exc).__name__)
@@ -160,6 +173,7 @@ class Collector:
                         usage,
                         status,
                         error,
+                        api_host=api_host(provider.provider_config),
                     )
                 )
                 collector._done()
@@ -200,6 +214,7 @@ class Collector:
                         usage.result(),
                         status,
                         error,
+                        api_host=api_host(provider.provider_config),
                     )
                 )
                 collector._done()

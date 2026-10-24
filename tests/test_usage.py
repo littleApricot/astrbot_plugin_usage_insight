@@ -351,6 +351,13 @@ def test_api_prices_report_and_error_rollback(tmp_path):
             assert (await client.get("/report?days=-1")).status_code == 400
             before = config["prices_json"]
             with patch.object(
+                plugin.pricing, "refresh", new_callable=AsyncMock, return_value=True
+            ) as refresh:
+                synced = await client.post("/refresh_prices", json={})
+                assert synced.status_code == 200 and synced.json()["synced"]
+                refresh.assert_awaited_once()
+            assert config["prices_json"] == before
+            with patch.object(
                 type(config), "save_config", side_effect=OSError("not writable")
             ):
                 failed = await client.post("/prices", json={"prices": []})
@@ -513,6 +520,9 @@ def test_actual_native_history_import_cutoff_dedup_and_unknown_cache(tmp_path):
                         provider_id="deepseek",
                         provider_model="model",
                         created_at=now - timedelta(days=1),
+                        start_time=(now - timedelta(days=1, minutes=1))
+                        .replace(tzinfo=timezone.utc)
+                        .timestamp(),
                         token_input_other=100,
                         token_input_cached=50,
                         token_output=20,
@@ -567,7 +577,13 @@ def test_actual_native_history_import_cutoff_dedup_and_unknown_cache(tmp_path):
             assert report["summary"]["turns"] == 2
             assert report["summary"]["input"] == 250
             assert report["summary"]["cache_input"] == 150
-            assert report["people"][0]["id"] == ""
+            assert report["people"][0]["id"] == "__history__"
+            expected_start = (
+                (now - timedelta(days=1, minutes=1))
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+            )
+            assert any(r["ts"] == expected_start for r in report["recent"])
         finally:
             plugin.collector.stop()
             await engine.dispose()

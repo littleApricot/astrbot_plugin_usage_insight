@@ -26,7 +26,7 @@ const evaluate=async expression=>{const response=await send('Runtime.evaluate',{
 const wait=async expression=>evaluate(`new Promise((resolve,reject)=>{let n=0;const timer=setInterval(()=>{if(${expression}){clearInterval(timer);resolve(true);}else if(++n>150){clearInterval(timer);reject(Error('UI condition timed out'));}},40);})`);
 await send('Page.navigate',{url:'http://127.0.0.1:6198/'},sessionId);
 await wait(`document.getElementById('status')?.textContent==='' && document.getElementById('people')?.children.length>0`);
-assert.equal(await evaluate(`document.getElementById('cost').textContent`),'未知');
+assert.match(await evaluate(`document.getElementById('cost').textContent`),/CNY/);
 assert.equal(await evaluate(`document.querySelectorAll('#recent tr').length`),50);
 await evaluate(`document.getElementById('price-open').click()`);await wait(`document.getElementById('price-dialog').open`);
 await evaluate(`for(const [key,value] of Object.entries({input:'2',cached:'.2',output:'3'})){document.querySelector('[data-field="'+key+'"]').value=value;}document.getElementById('price-save').click()`);
@@ -45,7 +45,7 @@ await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScal
 await evaluate(`window.scrollTo(0,0)`);screenshot=await send('Page.captureScreenshot',{format:'png'},sessionId);await writeFile('/private/tmp/usage-insight-mobile.png',Buffer.from(screenshot.data,'base64'));
 assert.equal(await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`),true);
 assert.deepEqual(errors,[]);
-console.log(JSON.stringify({loaded:true,unknownPrices:true,savePrices:true,attribution:true,personFilter:true,sharedFilter:true,pagination:true,mobileNoOverflow:true,scriptErrors:errors}));
+console.log(JSON.stringify({loaded:true,automaticOfficialPrices:true,saveOverrides:true,attribution:true,personFilter:true,sharedFilter:true,pagination:true,mobileNoOverflow:true,scriptErrors:errors}));
 await send('Browser.close');
 }finally{
 socket?.close();if(chrome.exitCode===null&&chrome.signalCode===null){chrome.kill('SIGTERM');await new Promise(resolve=>chrome.once('exit',resolve));}await rm(profile,{recursive:true,force:true});

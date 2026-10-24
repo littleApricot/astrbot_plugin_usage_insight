@@ -19,6 +19,7 @@ from sqlmodel import select
 
 from .capture import Collector
 from .ledger import KINDS, Ledger, prices_from_json
+from .pricing import PricingCatalog
 
 
 class UsageInsight(Star):
@@ -28,14 +29,21 @@ class UsageInsight(Star):
         directory = StarTools.get_data_dir("astrbot_plugin_usage_insight")
         directory.mkdir(parents=True, exist_ok=True)
         self.ledger = Ledger(directory / "usage.sqlite3")
+        self.pricing = PricingCatalog(directory)
+        self.pricing.bind_providers(self.context.get_all_providers())
         self.collector = Collector(
-            self.ledger, lambda: self.config.get("enabled", True), self.logger
+            self.ledger,
+            lambda: self.config.get("enabled", True),
+            self.logger,
+            price_snapshot=self.pricing.resolve,
         )
         self._import_task = None
+        self._pricing_task = None
         self.import_status = "pending"
         for path, handler, methods in (
             ("report", self.api_report, ["GET"]),
             ("prices", self.api_prices, ["GET", "POST"]),
+            ("refresh_prices", self.api_refresh_prices, ["POST"]),
         ):
             context.register_web_api(
                 "/astrbot_plugin_usage_insight/" + path,
@@ -47,6 +55,7 @@ class UsageInsight(Star):
     async def initialize(self):
         self.collector.refresh(self.context.get_all_providers())
         self._import_task = asyncio.create_task(self.import_history())
+        self._pricing_task = asyncio.create_task(self.pricing.run())
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize)
     async def bind_message(self, event: AstrMessageEvent):
@@ -109,7 +118,9 @@ class UsageInsight(Star):
                         else None
                     )
                     row = {
-                        "ts": date.timestamp(),
+                        "ts": record.start_time
+                        if record.start_time > 0
+                        else date.timestamp(),
                         "provider": record.provider_id or "unknown",
                         "model": record.provider_model or "unknown",
                         "kind": "history",
@@ -122,7 +133,12 @@ class UsageInsight(Star):
                         "usage": usage,
                         "error": "",
                     }
-                    self.ledger.put(row, "native:" + str(record.id), commit=False)
+                    self.ledger.put(
+                        row,
+                        "native:" + str(record.id),
+                        commit=False,
+                        update_history=True,
+                    )
                 self.ledger.db.commit()
                 if len(records) < 500:
                     break
@@ -150,6 +166,7 @@ class UsageInsight(Star):
 
     async def api_report(self):
         try:
+            self.pricing.bind_providers(self.context.get_all_providers())
             rules = prices_from_json(self.config.get("prices_json", "[]"))
             query = request.query
             result = await asyncio.to_thread(
@@ -165,12 +182,14 @@ class UsageInsight(Star):
                 attribution=str(query.get("attribution", "trigger")),
                 offset=int(query.get("offset", 0)),
                 limit=int(query.get("limit", 50)),
+                catalog=self.pricing,
             )
             result.update(
                 import_status=self.import_status,
                 kind_labels=KINDS,
                 collecting=bool(self.config.get("enabled", True)),
                 generated_at=time.time(),
+                auto_pricing=self.pricing.status(),
             )
             return json_response(result)
         except (ValueError, TypeError, json.JSONDecodeError):
@@ -194,13 +213,25 @@ class UsageInsight(Star):
                     raise
             else:
                 rules = prices_from_json(self.config.get("prices_json", "[]"))
-            return json_response({"prices": rules})
+            return json_response(
+                {"prices": rules, "auto_pricing": self.pricing.status()}
+            )
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             return error_response(str(exc), status_code=400)
         except Exception:
             return error_response("价格保存失败，请重试", status_code=500)
 
+    async def api_refresh_prices(self):
+        success = await self.pricing.refresh()
+        return json_response({"synced": success, "auto_pricing": self.pricing.status()})
+
     async def terminate(self):
+        if self._pricing_task is not None:
+            self._pricing_task.cancel()
+            try:
+                await self._pricing_task
+            except asyncio.CancelledError:
+                pass
         if self._import_task is not None and not self._import_task.done():
             self._import_task.cancel()
             try:

@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from .pricing import ALIASES, period_at
+
 KINDS = {
     "reply": "正式回复",
     "decision": "回复判断",
@@ -64,10 +66,7 @@ def prices_from_json(value):
     return result
 
 
-def estimate(row, rules):
-    usage = row.get("usage")
-    if usage is None:
-        return None
+def price_rule(row, rules, catalog=None):
     rule = next(
         (
             r
@@ -79,11 +78,42 @@ def estimate(row, rules):
     rule = rule or next(
         (r for r in rules if not r["provider"] and r["model"] == row["model"]), None
     )
+    if rule is not None:
+        return {**rule, "basis": "manual", "period": "fixed"}
+    snapshot = row.get("price_snapshot")
+    if snapshot is not None:
+        return snapshot
+    if catalog is not None:
+        found = catalog.resolve(row)
+        if found is not None:
+            return {**found, "basis": "retrospective"}
+    return None
+
+
+def cost_reason(row, rule, catalog=None):
+    if row.get("usage") is None:
+        return "旧统计未保存用量" if row["kind"] == "history" else "接口未返回用量"
     if rule is None:
+        if catalog is not None:
+            host = row.get("api_host", catalog.hosts.get(row["provider"], ""))
+            model = ALIASES.get(row["model"], row["model"])
+            if host == "api.deepseek.com" and model in catalog.data["models"]:
+                if period_at(row["ts"]) is None:
+                    return "缺少该年节假日历"
+        return "未匹配价格"
+    if row["usage"]["cached"] is None and Decimal(rule["input"]) != Decimal(
+        rule["cached"]
+    ):
+        return "缺少缓存明细"
+    return ""
+
+
+def estimate(row, rules, catalog=None):
+    rule = price_rule(row, rules, catalog)
+    if cost_reason(row, rule, catalog):
         return None
+    usage = row["usage"]
     cached = usage["cached"]
-    if cached is None and Decimal(rule["input"]) != Decimal(rule["cached"]):
-        return None
     hit = Decimal(cached or 0)
     miss = Decimal(usage["input"]) - hit
     million = Decimal(1000000)
@@ -91,6 +121,10 @@ def estimate(row, rules):
     cache_cost = hit * Decimal(rule["cached"]) / million
     output_cost = Decimal(usage["output"]) * Decimal(rule["output"]) / million
     return {
+        "basis": rule.get("basis", "manual"),
+        "period": rule.get("period", "fixed"),
+        "source": rule.get("source", ""),
+        "observed_at": rule.get("observed_at", ""),
         "currency": rule["currency"],
         "total": float(input_cost + cache_cost + output_cost),
         "input": float(input_cost),
@@ -193,10 +227,16 @@ class Ledger:
             self.db.execute("SELECT value FROM meta WHERE key='started'").fetchone()[0]
         )
 
-    def put(self, row, identifier=None, *, commit=True):
+    def put(self, row, identifier=None, *, commit=True, update_history=False):
         actor = row.get("actor") or {}
         self.db.execute(
-            "INSERT OR IGNORE INTO receipts VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO receipts VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) "
+            + (
+                "DO UPDATE SET ts=excluded.ts,data=excluded.data "
+                "WHERE receipts.kind='history' AND excluded.kind='history'"
+                if update_history
+                else "DO NOTHING"
+            ),
             (
                 identifier or uuid.uuid4().hex,
                 row["ts"],
@@ -232,6 +272,7 @@ class Ledger:
         attribution="trigger",
         offset=0,
         limit=50,
+        catalog=None,
     ):
         if attribution not in ("trigger", "participants"):
             raise ValueError("归因方式无效")
@@ -266,6 +307,7 @@ class Ledger:
             {k: {} for k in ("people", "models", "kinds", "origins", "trend")},
         )
         recent, count, models = [], 0, set()
+        unpriced, attribution_counts = {}, {}
         for (data,) in self.read_rows(
             "SELECT data FROM receipts WHERE "
             + " AND ".join(clauses)
@@ -281,14 +323,32 @@ class Ledger:
                 if attribution == "participants"
                 else ([row["actor"]] if row.get("actor") else [])
             )
+            shared_id, shared_label = (
+                ("__history__", "宿主历史（未记录用户）")
+                if row["kind"] == "history"
+                else ("__background__", "后台公共开销")
+                if row["kind"] in ("memory", "recognition")
+                else ("", "未识别触发者")
+            )
             if actor == "__shared__":
                 if persons:
                     continue
+            elif actor in ("__history__", "__background__", "__unassigned__"):
+                if persons or shared_id != ("" if actor == "__unassigned__" else actor):
+                    continue
             elif actor and not any(p["id"] == actor for p in persons):
                 continue
-            cost = estimate(row, rules)
+            cost = estimate(row, rules, catalog)
             # Filtering one participant returns their attributed share, not the full batch.
             weight = 1 / len(persons) if actor and persons else 1
+            reason = cost_reason(row, price_rule(row, rules, catalog), catalog)
+            if reason:
+                unpriced[reason] = unpriced.get(reason, 0) + weight
+            attribution_label = (
+                row["actor"]["name"] if row.get("actor") else shared_label
+            )
+            category = "已归属用户" if persons else shared_label
+            attribution_counts[category] = attribution_counts.get(category, 0) + weight
             add(total, row, cost, weight)
             day = datetime.fromtimestamp(row["ts"], tz).strftime("%Y-%m-%d")
             model_id = row["provider"] + "/" + row["model"]
@@ -320,13 +380,21 @@ class Ledger:
             else:
                 add(
                     groups["people"].setdefault(
-                        "", empty_bucket("共享 / 无法归属", "")
+                        shared_id, empty_bucket(shared_label, shared_id)
                     ),
                     row,
                     cost,
                 )
             if offset <= count < offset + limit:
-                recent.append({**row, "cost": cost, "attribution_weight": weight})
+                recent.append(
+                    {
+                        **row,
+                        "cost": cost,
+                        "cost_reason": reason,
+                        "attribution_label": attribution_label,
+                        "attribution_weight": weight,
+                    }
+                )
             count += 1
         return {
             "summary": finish(total),
@@ -347,6 +415,8 @@ class Ledger:
             "timezone": timezone,
             "attribution": attribution,
             "prices": rules,
+            "unpriced_reasons": unpriced,
+            "attribution_counts": attribution_counts,
         }
 
     def close(self):
