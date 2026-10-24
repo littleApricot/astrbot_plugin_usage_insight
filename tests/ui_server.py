@@ -50,6 +50,7 @@ with patch(
 ):
     plugin = UsageInsight(context, config)
 plugin.import_status = "complete"
+plugin.ledger.started = time.time() - 8 * 86400
 
 
 async def fake_balance_query(key, proxy=None):
