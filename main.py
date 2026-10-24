@@ -22,7 +22,7 @@ from .balances import BalanceMonitor
 from .capture import Collector
 from .ledger import KINDS, Ledger, prices_from_json
 from .pricing import PricingCatalog
-from .usage_tool import brief, query_usage
+from .usage_tool import query_usage
 
 
 class UsageInsight(Star):
@@ -75,19 +75,9 @@ class UsageInsight(Star):
 
     @filter.llm_tool(name="get_self_balance")
     async def get_self_balance(self, event: AstrMessageEvent) -> str:
-        """查询当前会话所用 DeepSeek 官方平台账户的真实余额。
+        """查询当前会话账户的人民币可用余额，单位元。
 
-        自动复用当前会话所选模型的 API Key。返回总可用余额、充值余额、
-        赠金余额、币种和 UTC 查询时间；页面与此工具共用查询和短期缓存。
-        只有 ok=true 才查到了余额，失败表示未知，不能解释为零。
-        余额属于整个账户，同账户的其他机器人和程序也会消耗它。
-        金额是 checked_at 时刻的快照，后续模型调用可能改变余额。
-        local_usage 只含近 7 天当前 Key 在本 bot 中采集的总 tokens、cost 和
-        完整性状态，金额是估算。更详细的按时间、按人和排行查询用 get_usage_stats。
-        other_app_usage 是同账号其他应用的消耗，state=unknown 且数值为 null；
-        本插件无法观测这些请求，不能把未知解释为零，也不能用余额差推算。
-        local_untagged_records 是本 bot 同提供商中缺少 Key 标记的旧记录数，
-        这部分没有纳入当前 Key 的 local_usage，不能归成其他应用消耗。
+        成功只返回金额数值，例如 12.34；无法查询人民币余额时返回“未知”。
         """
         try:
             selected = event.get_extra("selected_provider")
@@ -98,36 +88,13 @@ class UsageInsight(Star):
                     umo=event.unified_msg_origin
                 )
             result = await self.balances.query(provider)
+            if result.get("ok"):
+                for entry in result.get("balance_infos", []):
+                    if entry.get("currency") == "CNY":
+                        return entry["total_balance"]
         except Exception:
-            result = {"ok": False, "error": "provider_configuration_error"}
-            provider = None
-        if provider is not None:
-            try:
-                ref = self.balances.credential_ref(provider)
-                if ref:
-                    rules = prices_from_json(self.config.get("prices_json", "[]"))
-                    view = await asyncio.to_thread(
-                        self.balances.report,
-                        {ref: [str(provider.provider_config.get("id", ""))]},
-                        rules,
-                        days=7,
-                        timezone=self._timezone(),
-                    )
-                    result.update(
-                        local_usage=brief(view["groups"][0]["local_usage"]),
-                        local_usage_scope="current_key_this_astrbot",
-                        local_usage_days=7,
-                        balance_scope="account",
-                        other_app_usage={
-                            "state": "unknown",
-                            "tokens": None,
-                            "cost": None,
-                        },
-                        local_untagged_records=view["groups"][0]["untagged_records"],
-                    )
-            except Exception:
-                result["local_usage_error"] = "local_usage_unavailable"
-        return json.dumps(result, ensure_ascii=False)
+            pass
+        return "未知"
 
     @filter.llm_tool(name="get_usage_stats")
     async def get_usage_stats(

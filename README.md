@@ -50,37 +50,15 @@ https://github.com/littleApricot/astrbot_plugin_usage_insight
 
 ### 机器人余额工具
 
-`get_self_balance` 无业务参数，查询当前会话所选提供商对应的账户。余额字段保留原结构，本机用量摘要只返回总 token、金额和完整性状态：
+`get_self_balance` 无业务参数，查询当前会话所选提供商对应的账户。成功时只返回人民币总可用余额的十进制数值，单位元，例如 `12.34`；零余额返回对应的零金额。
 
-| 字段 | 含义 |
-| --- | --- |
-| `ok` | 是否成功；失败返回 `error`，不返回余额 |
-| `platform` | 模型平台，目前为 `DeepSeek` |
-| `provider_id` | 当前查询的提供商 ID |
-| `checked_at` | 余额查询时间，带时区的 UTC 时间 |
-| `is_available` | 官方返回的账户是否有可用余额 |
-| `balance_infos` | 各币种的余额列表，不跨币种相加 |
-| `currency` | 每项的币种：`CNY` 或 `USD` |
-| `total_balance` | 每项的总可用余额，含赠金和充值余额 |
-| `granted_balance` | 每项的未过期赠金余额 |
-| `topped_up_balance` | 每项的充值余额 |
-| `cached` | 是否复用了短期缓存，以 `checked_at` 判断快照时间 |
-| `snapshot_saved` | 可选，`false` 表示查到了真实余额，但本地快照保存失败 |
-| `local_usage` | 最近 7 天当前 Key 在本 bot 中的摘要：`tokens` 总 token、`cost` 按币种的估算金额、`tokens_state` 和 `cost_state` 完整性状态；状态定义见下文 |
-| `local_usage_scope` | `current_key_this_astrbot`，仅覆盖本机当前 Key 的调用 |
-| `local_usage_days` | 统计窗口，目前为 7 天 |
-| `local_untagged_records` | 本 bot 同提供商缺少 Key 标记的旧记录数；未计入当前 Key 用量，归属未知，不是其他应用 |
-| `balance_scope` | `account`，余额属于整个账户 |
-| `other_app_usage` | 同账号其他应用消耗：`state=unknown`，`tokens/cost` 均为 `null`；未知不表示零 |
-| `local_usage_error` | 可选，本机用量读取失败时的安全错误代码，不改变余额查询结果 |
-
-账号余额保留官方十进制字符串。Key 不作为工具参数或结果交给模型；失败时返回安全错误代码，避免把原始响应和异常交给模型。工具结果由 AstrBot 正常记录在工具往返中。
+无法查询或未取得人民币余额时返回“未知”。余额仍由官方查询与短期缓存提供，账号余额属于整个账户，查询后可能随调用发生变化。工具结果由 AstrBot 正常记录在工具往返中。
 
 ### 机器人花费查询工具
 
 更新至 v0.6.0 后，模型可调用 `get_usage_stats`。可以直接问“今天总共用了多少 token、花了多少钱”“小幸最近 7 天花了多少”“我最近 30 天的花费”“看看本群最近谁花得最多”。需要在当前模型工具配置中允许使用 `get_usage_stats`，模型自行选择是否调用；查账号余额仍使用 `get_self_balance`。
 
-工具复用网页“按触发者”的统计与价格：一次触发产生的整轮上下文开销归给触发者。默认查整个 bot 近 7 天的已采集记录，覆盖本机所有已采集提供商、模型和 Key；可指定当前群或会话。它与余额工具中“当前 Key”的近 7 天用量范围不同。查询在本地线程中读取统计库，不查询官方余额或调用生成模型；当前这轮尚未完成的调用会在采集完成后计入。
+工具复用网页“按触发者”的统计与价格：一次触发产生的整轮上下文开销归给触发者。默认查整个 bot 近 7 天的已采集记录，覆盖本机所有已采集提供商、模型和 Key；可指定当前群或会话。查询在本地线程中读取统计库，不查询官方余额或调用生成模型；当前这轮尚未完成的调用会在采集完成后计入。
 
 工具只把总 token、估算金额和归属交给模型。金额按币种分别汇总；个人排行按该币种已估算金额降序，同金额并列。无法计价的人单列，公共开销、宿主历史和未识别触发者也单列，均不冒充某个人。其他应用的花费保持未知。
 
@@ -201,3 +179,5 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ASTRBOT_SOURCE:$PWD/.." \
 `tests/check_page_offline.mjs` 通过进程管道调用真实 API 处理函数，并使用独立临时配置的无头 Chrome 检查筛选、价格保存、归因、分页及窄屏显示，无需监听端口，不连接用户已有浏览器配置。它通过 `tests/ui_rpc.py` 使用临时数据库和虚构数据。`tests/ui_server.py` 和 `tests/check_ui.mjs` 另提供本机 HTTP 测试方式。
 
 运行隔离页面检查时，设置 `ASTRBOT_SOURCE` 为 AstrBot 源码目录，`ASTRBOT_PYTHON` 为安装了 AstrBot 依赖的 Python 可执行文件，再运行 `node tests/check_page_offline.mjs`。Node 环境需能加载 Playwright；可用 `PLAYWRIGHT_PACKAGE` 指定其安装位置，`TEST_CHROME` 可指定浏览器可执行文件。全部页面测试使用临时配置，不读取已有浏览器资料。
+
+本次 v0.6.2 的余额工具返回调整未运行功能测试；发布仅核对版本、安装包和原插件源校验值。

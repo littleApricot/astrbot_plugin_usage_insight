@@ -266,27 +266,14 @@ def test_native_registered_tool_uses_selected_provider_and_shared_service(tmp_pa
                 new_callable=AsyncMock,
                 return_value=balance(),
             ) as query:
-                result = json.loads(await partial(tool.handler, plugin)(event))
+                result = await partial(tool.handler, plugin)(event)
                 page = await plugin.balances.view([])
+                assert result == balance()["balance_infos"][0]["total_balance"]
                 assert (
-                    result["ok"]
-                    and page["groups"][0]["latest"]["checked_at"]
-                    == result["checked_at"]
+                    page["groups"][0]["latest"]["balance_infos"][0]["total_balance"]
+                    == result
                 )
-                assert (
-                    result["local_usage_scope"] == "current_key_this_astrbot"
-                    and result["local_usage_days"] == 7
-                )
-                assert result["balance_scope"] == "account"
-                assert result["other_app_usage"]["state"] == "unknown"
-                assert result["other_app_usage"]["cost"] is None
-                assert result["local_untagged_records"] == 1
-                assert result["local_usage"]["tokens"] is None
-                assert result["local_usage"]["cost_state"] == "no_records"
-                assert not any(
-                    key in json.dumps(result)
-                    for key in ("cache_rate", "input_ratio", "cost_parts")
-                )
+                assert page["groups"][0]["latest"]["checked_at"]
                 context.get_using_provider_async.assert_not_awaited()
                 query.assert_awaited_once()
         finally:
