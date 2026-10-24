@@ -247,16 +247,17 @@ class Collector:
 
         @functools.wraps(original)
         async def request(session, method, url, **kwargs):
-            meta = metadata()
             payload = kwargs.get("json")
             if (
                 collector.stopped
                 or not collector.enabled()
-                or meta["kind"] != "decision"
                 or not isinstance(payload, dict)
                 or "questions" not in payload
                 or "state" not in payload
             ):
+                return await original(session, method, url, **kwargs)
+            meta = metadata()
+            if meta["kind"] != "decision":
                 return await original(session, method, url, **kwargs)
             start, usage, status, error = time.time(), None, "completed", ""
             collector.inflight += 1

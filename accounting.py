@@ -130,6 +130,11 @@ def caller_metadata():
             if frame is None:
                 break
             module = str(frame.f_globals.get("__name__", ""))
+            if not module.startswith(("astrbot.", "data.plugins.", "astrbot_plugin_")):
+                continue
+            # On Python 3.12 reading f_locals can repopulate a dictionary
+            # returned by locals(). Botpy uses one as its outgoing payload;
+            # touching that SDK frame puts its removed self back into JSON.
             values = frame.f_locals
             if "astrbot_plugin_reply_gate" in module:
                 result["kind"] = "decision"
@@ -149,11 +154,10 @@ def caller_metadata():
             ):
                 record = values.get("record", {})
                 result.update(kind="recognition", origin=str(record.get("origin", "")))
-            if module.startswith(("astrbot.", "data.plugins.", "astrbot_plugin_")):
-                event = values.get("event")
-                if callable(getattr(event, "get_sender_id", None)):
-                    kind = result["kind"] if result["kind"] != "other" else "reply"
-                    return event_metadata(event, kind)
+            event = values.get("event")
+            if callable(getattr(event, "get_sender_id", None)):
+                kind = result["kind"] if result["kind"] != "other" else "reply"
+                return event_metadata(event, kind)
         return result
     finally:
         del frame
