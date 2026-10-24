@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import astrbot_plugin_usage_insight.balances as balance_module
 from astrbot_plugin_usage_insight.main import UsageInsight
 
 temporary = tempfile.TemporaryDirectory(prefix="usage-insight-ui-")
@@ -37,7 +39,8 @@ context = SimpleNamespace(
             provider_config={
                 "id": "test-deepseek",
                 "api_base": "https://api.deepseek.com/v1",
-            }
+            },
+            get_current_key=lambda: "synthetic-ui-key",
         )
     ],
     get_config=lambda: {"timezone": "Asia/Shanghai"},
@@ -47,6 +50,52 @@ with patch(
 ):
     plugin = UsageInsight(context, config)
 plugin.import_status = "complete"
+
+
+async def fake_balance_query(key, proxy=None):
+    return {
+        "ok": True,
+        "platform": "DeepSeek",
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "is_available": True,
+        "balance_infos": [
+            {
+                "currency": "CNY",
+                "total_balance": "14.94",
+                "granted_balance": "0.00",
+                "topped_up_balance": "14.94",
+            }
+        ],
+    }
+
+
+balance_module.query_deepseek_balance = fake_balance_query
+ref = plugin.balances.credential_ref(context.get_all_providers()[0])
+for age, amount in ((600, "15.00"), (300, "14.95")):
+    ts = time.time() - age
+    snapshot = {
+        "ok": True,
+        "platform": "DeepSeek",
+        "checked_at": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+        "is_available": True,
+        "balance_infos": [
+            {
+                "currency": "CNY",
+                "total_balance": amount,
+                "granted_balance": "0.00",
+                "topped_up_balance": amount,
+            }
+        ],
+        "request_start": ts - 1,
+        "request_end": ts,
+        "inflight": False,
+        "collecting": True,
+    }
+    plugin.ledger.db.execute(
+        "INSERT INTO balance_snapshots(credential_ref,ts,data) VALUES(?,?,?)",
+        (ref, ts, json.dumps(snapshot)),
+    )
+plugin.ledger.db.commit()
 for i in range(125):
     person = {
         "id": "qq:test-" + str(i % 4),
@@ -66,6 +115,7 @@ for i in range(125):
             if i % 4 < 2
             else [],
             "unit": "turn" if i == 2 else "call",
+            "balance_ref": ref if i == 1 else "",
             "status": "completed" if i % 11 else "error",
             "duration": 1.25,
             "usage": {"input": 1000 + i * 10, "cached": 800, "output": 100}

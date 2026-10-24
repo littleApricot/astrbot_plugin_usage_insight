@@ -1,5 +1,7 @@
 {
   "enabled": {"description": "采集模型用量", "type": "bool", "default": true},
   "prices_json": {"description": "手动价格覆盖 JSON（可选）", "type": "text", "default": "[]", "hint": "DeepSeek 官方接口自动同步人民币价格，并按请求时间区分峰谷，无需填写。中转接口或特殊折扣可在统计页面覆盖单价。"},
-  "history_days": {"description": "首次读取宿主历史统计的天数", "type": "int", "default": 365}
+  "history_days": {"description": "首次读取宿主历史统计的天数", "type": "int", "default": 365},
+  "balance_auto_refresh": {"description": "自动采样 DeepSeek 官方余额", "type": "bool", "default": true, "hint": "复用已配置的官方提供商 Key，只读取余额；机器人工具和页面共用同一查询。"},
+  "balance_interval": {"description": "余额采样间隔（秒）", "type": "int", "default": 300, "hint": "范围 30～86400 秒；余额属于整个账号。本地 Key 花费只汇总本 AstrBot 采集的调用。"}
 }

@@ -17,6 +17,7 @@ from astrbot.core import db_helper
 from astrbot.core.db.po import ProviderStat
 from sqlmodel import select
 
+from .balances import BalanceMonitor
 from .capture import Collector
 from .ledger import KINDS, Ledger, prices_from_json
 from .pricing import PricingCatalog
@@ -39,11 +40,15 @@ class UsageInsight(Star):
         )
         self._import_task = None
         self._pricing_task = None
+        self.balances = BalanceMonitor(context, self.ledger, config, self.pricing)
+        self.collector.balance_scope = self.balances.credential_ref
+        self._balance_task = None
         self.import_status = "pending"
         for path, handler, methods in (
             ("report", self.api_report, ["GET"]),
             ("prices", self.api_prices, ["GET", "POST"]),
             ("refresh_prices", self.api_refresh_prices, ["POST"]),
+            ("balances", self.api_balances, ["GET", "POST"]),
         ):
             context.register_web_api(
                 "/astrbot_plugin_usage_insight/" + path,
@@ -56,6 +61,52 @@ class UsageInsight(Star):
         self.collector.refresh(self.context.get_all_providers())
         self._import_task = asyncio.create_task(self.import_history())
         self._pricing_task = asyncio.create_task(self.pricing.run())
+        self._balance_task = asyncio.create_task(self.balances.run())
+
+    @filter.llm_tool(name="get_self_balance")
+    async def get_self_balance(self, event: AstrMessageEvent) -> str:
+        """查询当前会话所用 DeepSeek 官方平台账户的真实余额。
+
+        自动复用当前会话所选模型的 API Key。返回总可用余额、充值余额、
+        赠金余额、币种和 UTC 查询时间；页面与此工具共用查询和短期缓存。
+        只有 ok=true 才查到了余额，失败表示未知，不能解释为零。
+        余额属于整个账户，同账户的其他机器人和程序也会消耗它。
+        金额是 checked_at 时刻的快照，后续模型调用可能改变余额。
+        local_usage 是最近 7 天当前 Key 在此 AstrBot 中采集到的用量和费用
+        估算，不包含其他程序的调用，不是该 Key 的官方账单。
+        """
+        try:
+            selected = event.get_extra("selected_provider")
+            if isinstance(selected, str) and selected:
+                provider = self.context.get_provider_by_id(selected)
+            else:
+                provider = await self.context.get_using_provider_async(
+                    umo=event.unified_msg_origin
+                )
+            result = await self.balances.query(provider)
+        except Exception:
+            result = {"ok": False, "error": "provider_configuration_error"}
+            provider = None
+        if provider is not None:
+            try:
+                ref = self.balances.credential_ref(provider)
+                if ref:
+                    rules = prices_from_json(self.config.get("prices_json", "[]"))
+                    view = await asyncio.to_thread(
+                        self.balances.report,
+                        {ref: [str(provider.provider_config.get("id", ""))]},
+                        rules,
+                        days=7,
+                        timezone=self._timezone(),
+                    )
+                    result.update(
+                        local_usage=view["groups"][0]["local_usage"],
+                        local_usage_scope="current_key_this_astrbot",
+                        local_usage_days=7,
+                    )
+            except Exception:
+                result["local_usage_error"] = "local_usage_unavailable"
+        return json.dumps(result, ensure_ascii=False)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize)
     async def bind_message(self, event: AstrMessageEvent):
@@ -225,7 +276,28 @@ class UsageInsight(Star):
         success = await self.pricing.refresh()
         return json_response({"synced": success, "auto_pricing": self.pricing.status()})
 
+    async def api_balances(self):
+        try:
+            if request.method == "POST":
+                await self.balances.refresh()
+            rules = prices_from_json(self.config.get("prices_json", "[]"))
+            return json_response(
+                await self.balances.view(
+                    rules,
+                    days=int(request.query.get("days", 7)),
+                    timezone=self._timezone(),
+                )
+            )
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return error_response("价格规则无效，请检查插件配置", status_code=400)
+
     async def terminate(self):
+        if self._balance_task is not None:
+            self._balance_task.cancel()
+            try:
+                await self._balance_task
+            except asyncio.CancelledError:
+                pass
         if self._pricing_task is not None:
             self._pricing_task.cancel()
             try:

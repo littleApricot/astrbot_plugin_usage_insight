@@ -32,6 +32,11 @@ try{
  const html=await readFile('pages/usage/index.html','utf8');
  await page.setContent(html.replace('<head>','<head>'+bridge));
  await page.waitForFunction(()=>document.getElementById('status').textContent===''&&document.querySelectorAll('#people tr').length>0);
+ await page.waitForFunction(()=>document.getElementById('balance-status').textContent===''&&document.getElementById('account-balances').textContent.includes('14.95'));
+ await page.locator('#balance-refresh').click();await page.waitForFunction(()=>document.getElementById('balance-status').textContent===''&&document.getElementById('account-balances').textContent.includes('14.94'));
+ assert.match(await page.locator('#key-usage').innerText(),/旧记录缺少 Key 标记/);
+ assert.equal(await page.locator('#key-usage tr').count(),1);
+ assert.equal(await page.locator('#key-usage tr td').nth(1).innerText(),'1');
  assert.match(await page.locator('#cost').innerText(),/CNY/);
  assert.match(await page.locator('#cost-coverage').innerText(),/未匹配价格/);
  assert.match(await page.locator('#people').innerText(),/宿主历史（未记录用户）/);
@@ -56,7 +61,7 @@ try{
  await page.setViewportSize({width:390,height:844});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));assert.equal(await page.locator('h1').count(),1);await page.screenshot({path:'/private/tmp/usage-insight-mobile.png'});await page.locator('#people').scrollIntoViewIfNeeded();await page.screenshot({path:'/private/tmp/usage-insight-mobile-people.png'});
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
  assert.deepEqual(errors,[]);
- console.log(JSON.stringify({loaded:true,automaticOfficialPrices:true,priceReasons:true,separateHistoricalAttribution:true,saveOverrides:true,attribution:true,personFilter:true,sharedFilter:true,pagination:true,mobileNoOverflow:true,scriptErrors:errors,apiTransport:'in-process ASGI over pipes'}));
+ console.log(JSON.stringify({loaded:true,officialBalanceRefresh:true,isolatedKeyUsage:true,automaticOfficialPrices:true,priceReasons:true,separateHistoricalAttribution:true,saveOverrides:true,attribution:true,personFilter:true,sharedFilter:true,pagination:true,mobileNoOverflow:true,scriptErrors:errors,apiTransport:'in-process ASGI over pipes'}));
 }finally{
  if(browser)await browser.close();
  lines.close();python.stdin.end();if(python.exitCode===null&&python.signalCode===null){const exited=new Promise(resolve=>python.once('exit',resolve));python.kill('SIGTERM');await exited;}await rm(runtime,{recursive:true,force:true});

@@ -48,6 +48,7 @@ class Collector:
         self.patches = []
         self.stopped, self.inflight = False, 0
         self.price_snapshot = price_snapshot
+        self.balance_scope = None
 
     def bind_event(self, event):
         previous = event.get_extra("usage_insight_scope")
@@ -144,6 +145,9 @@ class Collector:
             if collector.stopped or not collector.enabled() or DEPTH.get():
                 return await original(provider, *args, **kwargs)
             start, meta, token = time.time(), metadata(), DEPTH.set(1)
+            balance_ref = (
+                collector.balance_scope(provider) if collector.balance_scope else ""
+            )
             collector.inflight += 1
             usage, status, error = None, "completed", ""
             try:
@@ -164,6 +168,13 @@ class Collector:
                 raise
             finally:
                 DEPTH.reset(token)
+                if collector.balance_scope:
+                    meta = {
+                        **meta,
+                        "balance_ref": balance_ref
+                        if balance_ref == collector.balance_scope(provider)
+                        else "",
+                    }
                 collector.write(
                     receipt(
                         meta,
@@ -185,6 +196,9 @@ class Collector:
                     yield item
                 return
             start, meta, token = time.time(), metadata(), DEPTH.set(1)
+            balance_ref = (
+                collector.balance_scope(provider) if collector.balance_scope else ""
+            )
             collector.inflight += 1
             usage, status, error = StreamUsage(), "completed", ""
             try:
@@ -205,6 +219,13 @@ class Collector:
                 raise
             finally:
                 DEPTH.reset(token)
+                if collector.balance_scope:
+                    meta = {
+                        **meta,
+                        "balance_ref": balance_ref
+                        if balance_ref == collector.balance_scope(provider)
+                        else "",
+                    }
                 collector.write(
                     receipt(
                         meta,

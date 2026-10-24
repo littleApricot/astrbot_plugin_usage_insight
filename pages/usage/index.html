@@ -18,6 +18,7 @@
 </div>
 <div id="status" class="status" role="status" aria-live="polite">正在读取统计…</div>
 <div id="empty" class="panel empty" hidden>暂无记录。启用插件后的模型调用会自动出现在这里。</div>
+<section class="panel" style="margin:14px 0" aria-label="官方账户余额与本机 Key 用量"><div class="section-head"><h2>官方账户余额与本机 Key 用量</h2><button id="balance-refresh">刷新官方余额</button></div><p class="hint">余额属于整个账号，其他 agent 也会影响余额。本机 Key 用量只包含此 AstrBot 采集的调用，跟随时间筛选；余额独立于筛选。</p><div id="balance-status" class="status" role="status"></div><div class="table-wrap"><table><thead><tr><th>提供商 / 币种</th><th class="num">账号总可用余额</th><th class="num">赠金</th><th class="num">充值余额</th><th>查询时间</th><th>余额状态</th></tr></thead><tbody id="account-balances"></tbody></table></div><h2 style="margin-top:18px">当前 Key 在本机的用量与估算</h2><div class="table-wrap"><table><thead><tr><th>提供商</th><th class="num">调用数</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存命中</th><th class="num">费用估算</th><th>计价覆盖</th></tr></thead><tbody id="key-usage"></tbody></table></div><p class="hint" id="balance-note"></p></section>
 <main id="content">
 <section class="cards" aria-label="用量总览">
 <div class="card"><div class="label">费用估算</div><div id="cost" class="value">—</div><div id="cost-coverage" class="hint"></div></div>
@@ -50,6 +51,8 @@ async function api(method,path,body){const bridge=window.AstrBotPluginPage;if(!b
 function cell(row,text,cls){row.append(el('td',text,cls));}
 function emptyTable(id,columns){const row=el('tr'),td=el('td','暂无记录','empty');td.colSpan=columns;row.append(td);$(id).append(row);}
 function renderGroups(id,items,columns,draw){$(id).replaceChildren();for(const item of items){const row=el('tr');draw(row,item);$(id).append(row);}if(!items.length)emptyTable(id,columns);}
+async function loadBalances(refresh=false){$('balance-refresh').disabled=true;$('balance-status').textContent=refresh?'正在向官方查询余额…':'正在读取余额与本机用量…';try{const report=await api(refresh?'POST':'GET','balances?days='+$('days').value,refresh?{}:undefined);$('account-balances').replaceChildren();$('key-usage').replaceChildren();for(const group of report.groups){const usage=group.local_usage,keyRow=el('tr');cell(keyRow,group.provider_ids.join(' / '));for(const value of [usage.calls,usage.input,usage.output])cell(keyRow,num(value),'num');cell(keyRow,pct(usage.cache_rate),'num');cell(keyRow,money(usage.cost),'num');cell(keyRow,`${num(usage.priced_count)} / ${num(usage.records)} 份；另有 ${num(group.untagged_records)} 条旧记录缺少 Key 标记`);$('key-usage').append(keyRow);if(!group.latest){const row=el('tr');cell(row,group.provider_ids.join(' / '));const td=el('td',group.last_error?'查询失败，账号余额未知':'等待首次账号余额快照');td.colSpan=5;row.append(td);$('account-balances').append(row);continue;}const last=group.latest;for(const balance of last.balance_infos){const row=el('tr');cell(row,group.provider_ids.join(' / ')+' · '+balance.currency);cell(row,balance.currency+' '+balance.total_balance,'num');cell(row,balance.granted_balance,'num');cell(row,balance.topped_up_balance,'num');cell(row,new Date(last.checked_at).toLocaleString('zh-CN',{timeZone:lastReport?.timezone||'Asia/Shanghai',hour12:false}));cell(row,group.last_error?'最近查询失败，保留上次快照':last.is_available?'账号有可用余额':'官方返回账号余额不可用');$('account-balances').append(row);}}if(!report.groups.length){emptyTable('account-balances',6);emptyTable('key-usage',7);}$('balance-note').textContent=`自动余额采样${report.auto_refresh?'已开启':'已暂停'}，间隔 ${report.interval_seconds} 秒。同一个 Key 的提供商合并展示，不同 Key 可能共用账号，账号余额不要相加。本机 Key 花费为用量估算，不包含该 Key 在其他程序中的调用。官方按 Key 用量可在 DeepSeek 控制台查看。`;$('balance-status').textContent='';}catch(error){$('balance-status').textContent=error.message;}finally{$('balance-refresh').disabled=false;}}
+
 function render(report){
 lastReport=report;const summary=report.summary;
 $('empty').hidden=report.count>0;$('content').hidden=report.count===0;
@@ -80,9 +83,10 @@ $('price-open').onclick=async()=>{try{const result=await api('GET','prices');ren
 $('price-sync').onclick=async()=>{$('price-sync').disabled=true;$('price-status').textContent='正在读取官方公开价格…';try{const result=await api('POST','refresh_prices',{});renderAuto(result.auto_pricing);$('price-status').textContent=result.synced?'已同步官方价格':'同步失败，保留上次可用的官方价格';await load();}catch(e){$('price-status').textContent=e.message;}finally{$('price-sync').disabled=false;}};
 $('price-add').onclick=()=>priceRow();$('price-close').onclick=()=>$('price-dialog').close();
 $('price-save').onclick=async()=>{const prices=[];for(const row of $('price-rows').children){const rule={};for(const input of row.querySelectorAll('input'))rule[input.dataset.field]=input.value.trim();prices.push(rule);}$('price-save').disabled=true;try{await api('POST','prices',{prices});$('price-status').textContent='已保存，统计金额已重新估算';await load();}catch(e){$('price-status').textContent=e.message;}finally{$('price-save').disabled=false;}};
-for(const id of ['days','model','kind','attribution'])$(id).onchange=()=>{offset=0;load();};
-$('refresh').onclick=load;$('prev').onclick=()=>{offset=Math.max(0,offset-50);load();};$('next').onclick=()=>{offset+=50;load();};$('reset').onclick=()=>{actor='';actorName='';offset=0;$('model').value='';$('kind').value='';load();};
-if(window.AstrBotPluginPage)load();else window.addEventListener('load',load,{once:true});
+for(const id of ['days','model','kind','attribution'])$(id).onchange=()=>{offset=0;load();if(id==='days')loadBalances();};
+$('balance-refresh').onclick=()=>loadBalances(true);
+$('refresh').onclick=()=>{load();loadBalances();};$('prev').onclick=()=>{offset=Math.max(0,offset-50);load();};$('next').onclick=()=>{offset+=50;load();};$('reset').onclick=()=>{actor='';actorName='';offset=0;$('model').value='';$('kind').value='';load();};
+if(window.AstrBotPluginPage){load();loadBalances();}else window.addEventListener('load',()=>{load();loadBalances();},{once:true});
 </script>
 </body>
 </html>
