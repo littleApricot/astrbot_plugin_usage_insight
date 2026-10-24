@@ -87,98 +87,81 @@ def query(setup, **kwargs):
     return json.loads(asyncio.run(plugin.get_usage_stats(event, **kwargs)))
 
 
-def test_totals_and_ranking_use_money_not_tokens_and_match_page(setup):
+def test_compact_totals_and_full_ranking_match_page(setup):
     plugin, _, _ = setup
     result = query(setup)
-    assert result["summary"]["tokens"] == 1100000
-    assert result["summary"]["cost"] == {"CNY": 3}
-    ranking = result["rankings"]["CNY"]["entries"]
-    assert [p["id"] for p in ranking] == ["qq:u2", "qq:u1"]
-    assert [p["amount"] for p in ranking] == [2, 1]
+    assert result == {
+        "total_tokens": 1100000,
+        "total_cost": 3,
+        "people": [
+            {"name": "测试乙", "tokens": 100000, "cost": 2},
+            {"name": "小幸", "tokens": 1000000, "cost": 1},
+        ],
+    }
     page = plugin.ledger.report(
         prices_from_json(plugin.config["prices_json"]), catalog=plugin.pricing
     )
-    assert result["summary"]["cost"] == page["summary"]["cost"]
-    text = json.dumps(result)
-    for field in (
-        "cache_rate",
-        "input_ratio",
-        "output_ratio",
-        "cost_parts",
-        "provider",
-        "price_snapshot",
-        "balance_ref",
-        "private-key-tag",
-    ):
-        assert field not in text
+    assert result["total_cost"] == page["summary"]["cost"]["CNY"]
 
 
-@pytest.mark.parametrize("person", ["小幸", "u1", "qq:u1", "me", "我"])
-def test_person_lookup_returns_only_target_and_no_rankings(setup, person):
-    result = query(setup, person=person)
-    assert result["ok"] and result["person"]["id"] == "qq:u1"
-    assert result["summary"]["cost"] == {"CNY": 1}
-    assert result["summary"]["tokens"] == 1000000
-    assert "rankings" not in result
+def test_all_members_are_returned_without_truncation(setup):
+    _, _, add = setup
+    for number in range(3, 24):
+        add("u" + str(number), "成员" + str(number), tokens=number * 1000000)
+    people = query(setup)["people"]
+    assert len(people) == 23
+    assert [p["cost"] for p in people] == sorted(
+        (p["cost"] for p in people), reverse=True
+    )
+    assert all(set(p) == {"name", "tokens", "cost"} for p in people)
 
 
-def test_same_name_is_not_merged_and_exact_id_resolves_it(setup):
+def test_same_names_remain_separate_rows(setup):
     _, _, add = setup
     add("u3", "小幸", tokens=2000000)
-    result = query(setup, person="小幸")
-    assert result["error"] == "ambiguous_person"
-    assert {p["id"] for p in result["candidates"]} == {"qq:u1", "qq:u3"}
-    assert query(setup, person="qq:u3")["summary"]["cost"] == {"CNY": 2}
+    people = [p for p in query(setup)["people"] if p["name"] == "小幸"]
+    assert [p["cost"] for p in people] == [2, 1]
 
 
-def test_current_chat_scope_excludes_other_chats_but_all_keeps_them(setup):
+def test_cny_amounts_do_not_convert_or_mislabel_other_currencies(setup):
     _, _, add = setup
-    add("u3", "其他群", tokens=5000000, origin="qq:group:g2")
-    assert query(setup, scope="current_chat")["summary"]["cost"] == {"CNY": 3}
-    assert query(setup, scope="all")["summary"]["cost"] == {"CNY": 8}
-
-
-def test_currencies_rank_separately_and_known_zero_remains_zero(setup):
-    _, _, add = setup
-    add("u3", "美元", "usd", 100000)
+    add("u3", "非人民币记录", "usd", 100000)
     add("u4", "免费", "free", 100000)
     result = query(setup)
-    assert result["summary"]["cost"] == {"CNY": 3, "USD": 0.5}
-    assert result["rankings"]["USD"]["entries"][0]["amount"] == 0.5
-    assert result["rankings"]["CNY"]["entries"][-1]["amount"] == 0
-    assert result["rankings"]["CNY"]["entries"][-1]["cost_state"] == "estimated"
+    assert result["total_cost"] is None
+    assert (
+        next(p for p in result["people"] if p["name"] == "非人民币记录")["cost"] is None
+    )
+    assert next(p for p in result["people"] if p["name"] == "免费")["cost"] == 0
+    assert "USD" not in json.dumps(result)
 
 
-def test_unknown_cost_and_missing_usage_do_not_rank_as_free(setup):
+def test_incomplete_own_data_returns_null_instead_of_zero_or_partial_totals(setup):
     _, _, add = setup
     add("u3", "未知价格", "no-price", 500000)
     add("u4", "未知用量", usage=None)
     add("u1", "小幸", "no-price", 10)
     result = query(setup)
-    assert result["summary"]["cost_state"] == "partial"
-    assert result["summary"]["tokens_state"] == "partial"
-    assert result["people_without_priced_cost_total"] == 2
-    assert {p["id"] for p in result["people_without_priced_cost"]} == {"qq:u3", "qq:u4"}
-    assert len(result["rankings"]["CNY"]["entries"]) == 2
-    assert result["rankings"]["CNY"]["entries"][1]["cost_state"] == "partial"
-    unknown = query(setup, person="qq:u4")["summary"]
-    assert unknown["tokens"] is None and unknown["cost"] == {}
-    assert unknown["tokens_state"] == unknown["cost_state"] == "unknown"
+    assert result["total_cost"] is None and result["total_tokens"] is None
+    people = {p["name"]: p for p in result["people"]}
+    assert people["未知价格"]["tokens"] == 500000
+    assert people["未知价格"]["cost"] is None
+    assert people["未知用量"]["tokens"] is None
+    assert people["小幸"]["cost"] is None
+    assert result["people"][0]["name"] == "测试乙"
 
 
-def test_background_and_history_are_outside_person_ranking(setup):
+def test_compression_is_in_total_but_not_charged_to_a_person(setup):
     _, _, add = setup
-    add("", kind="memory")
-    add("", kind="history", unit="turn")
-    add("", kind="other")
+    add("u1", kind="compression", tokens=200000)
+    add("", kind="memory", tokens=300000)
     result = query(setup)
-    assert result["summary"]["cost"] == {"CNY": 6}
-    assert len(result["rankings"]["CNY"]["entries"]) == 2
-    assert {p["name"] for p in result["unattributed"]} == {
-        "后台公共开销",
-        "宿主历史（未记录用户）",
-        "未识别触发者",
-    }
+    assert result["total_tokens"] == 1600000
+    assert result["total_cost"] == pytest.approx(3.5)
+    assert result["compression"] == {"tokens": 200000, "cost": 0.2}
+    assert len(result["people"]) == 2
+    assert next(p for p in result["people"] if p["name"] == "小幸")["tokens"] == 1000000
+    assert "other_app_usage" not in result
 
 
 def test_days_use_local_calendar_and_all_includes_older_records(setup):
@@ -198,53 +181,28 @@ def test_days_use_local_calendar_and_all_includes_older_records(setup):
         ).timestamp()
         add(ts=ts, tokens=amount)
     with patch("astrbot_plugin_usage_insight.ledger.datetime", FixedDateTime):
-        assert query(setup, days=1)["summary"]["cost"] == {"CNY": 1}
-        assert query(setup, days=7)["summary"]["cost"] == {"CNY": 3}
-        assert query(setup, days=0)["summary"]["cost"] == {"CNY": 6}
+        assert query(setup, days=1)["total_cost"] == 1
+        assert query(setup, days=7)["total_cost"] == 3
+        assert query(setup, days=0)["total_cost"] == 6
 
 
-def test_empty_self_and_missing_person_are_explicit(setup):
+def test_no_collected_records_has_empty_ranking(setup):
     plugin, _, _ = setup
-    assert query(setup, person="不存在的人")["error"] == "person_not_found"
     plugin.ledger.db.execute("DELETE FROM receipts")
     plugin.ledger.db.commit()
-    result = query(setup, person="me")
-    assert result["summary"]["tokens"] is None
-    assert result["summary"]["cost_state"] == "no_records"
-    assert query(setup)["rankings"] == {}
+    assert query(setup) == {"total_tokens": 0, "total_cost": 0, "people": []}
 
 
-def test_rank_ties_and_limits_keep_people_distinct(setup):
-    _, _, add = setup
-    add("u3", "测试丙", tokens=2000000)
-    entries = query(setup, limit=2)["rankings"]["CNY"]["entries"]
-    assert len(entries) == 2 and [p["rank"] for p in entries] == [1, 1]
-    assert {p["id"] for p in entries} == {"qq:u2", "qq:u3"}
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        {"days": -1},
-        {"days": True},
-        {"days": "7"},
-        {"days": 7.5},
-        {"limit": 51},
-        {"scope": "bad"},
-        {"person": None},
-    ],
-)
-def test_invalid_queries_return_safe_errors(setup, args):
-    result = query(setup, **args)
+@pytest.mark.parametrize("days", [-1, True, "7", 7.5, float("nan"), float("inf")])
+def test_invalid_days_return_safe_errors(setup, days):
+    result = query(setup, days=days)
     assert not result["ok"] and result["error"] == "invalid_query"
 
 
-def test_native_tool_executor_passes_registered_arguments_without_network_or_messages(
-    setup,
-):
+def test_native_tool_executor_exposes_only_days(setup):
     plugin, event, _ = setup
     tool = llm_tools.get_func("get_usage_stats")
-    assert set(tool.parameters["properties"]) == {"days", "person", "scope", "limit"}
+    assert set(tool.parameters["properties"]) == {"days"}
     assert tool.parameters["properties"]["days"]["type"] == "number"
     bound = FunctionTool(
         name=tool.name,
@@ -265,19 +223,67 @@ def test_native_tool_executor_passes_registered_arguments_without_network_or_mes
             side_effect=AssertionError("must not query account"),
         ) as balance:
             results = [
-                r
-                async for r in FunctionToolExecutor.execute(
-                    bound,
-                    context,
-                    days=7.0,
-                    person="小幸",
-                    scope="current_chat",
-                    limit=10.0,
-                )
+                r async for r in FunctionToolExecutor.execute(bound, context, days=7.0)
             ]
             balance.assert_not_awaited()
         result = json.loads(results[0].content[0].text)
-        assert result["ok"] and result["summary"]["cost"] == {"CNY": 1}
+        assert result["total_cost"] == 3
+        assert len(result["people"]) == 2
         event.send.assert_not_awaited()
 
     asyncio.run(run())
+
+
+def test_lcm_wait_for_compression_is_captured_without_inherited_user(setup):
+    from astrbot_plugin_usage_insight.capture import BOUND
+
+    plugin, _, _ = setup
+
+    class Provider:
+        provider_config = {"id": "p"}
+
+        def get_model(self):
+            return "cheap"
+
+        async def text_chat(self, **kwargs):
+            return SimpleNamespace(
+                role="assistant",
+                raw_completion={
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 20,
+                        "prompt_cache_hit_tokens": 50,
+                    }
+                },
+            )
+
+    provider = Provider()
+    plugin.collector.refresh([provider])
+    namespace = {"__name__": "astrbot_plugin_lcm.fake_worker", "asyncio": asyncio}
+    exec(
+        "async def work(provider):\n    scope = {'origin': 'qq:group:g1'}\n    return await asyncio.wait_for(provider.text_chat(prompt='summary'), timeout=3)\n",
+        namespace,
+    )
+
+    async def run():
+        parent = {
+            "kind": "reply",
+            "origin": "qq:group:g1",
+            "actor": {"id": "qq:u1", "name": "小幸"},
+            "participants": [],
+        }
+        token = BOUND.set(parent)
+        try:
+            await namespace["work"](provider)
+            assert BOUND.get() is parent
+        finally:
+            BOUND.reset(token)
+
+    asyncio.run(run())
+    rows = plugin.ledger.report(prices_from_json(plugin.config["prices_json"]), days=0)[
+        "recent"
+    ]
+    compression = next(row for row in rows if row["kind"] == "compression")
+    assert compression["actor"] is None and compression["participants"] == []
+    assert compression["origin"] == "qq:group:g1"
+    assert compression["usage"]["input"] == 100

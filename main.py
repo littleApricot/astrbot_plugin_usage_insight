@@ -17,7 +17,6 @@ from astrbot.core import db_helper
 from astrbot.core.db.po import ProviderStat
 from sqlmodel import select
 
-from .accounting import event_identity
 from .balances import BalanceMonitor
 from .capture import Collector
 from .ledger import KINDS, Ledger, prices_from_json
@@ -101,24 +100,14 @@ class UsageInsight(Star):
         self,
         event: AstrMessageEvent,
         days: int = 7,
-        person: str = "",
-        scope: str = "all",
-        limit: int = 10,
     ) -> str:
-        """查询本 bot 最近花费、某个人的花费或个人花费排行。
+        """查询最近的总 token、总人民币花费和全部成员的花费排行。
 
-        返回总 token、费用估算和花费归属。
-        问今天、本周、最近花了多少、谁花得最多或某个人花费时调用此工具；
-        账户余额用 get_self_balance。默认近 7 天、整个 bot、按触发者归属。
-        日期按 bot 配置时区自然日计算，包含今天。金额按币种分别列出。
-        partial 是已知部分；unknown 或 no_records 不表示实际零花费。
-        同名返回候选 ID，确认对应用户后再查；其他应用花费始终未知。
+        金额为人民币估算，单位元；个人按花费降序排列，均含 token 和花费。
+        总额包含后台调用，已分类的上下文压缩开销另列。数据不完整的数值返回 null。
 
         Args:
             days(number): 整数天数，默认 7；1 为今天、30 为近 30 天、0 为全部已采集数据，范围 0～36500。
-            person(string): 留空返回总花费及排行；指定昵称、原始用户 ID 或统计结果中的完整 ID 查询个人；me 表示本次消息发送者。
-            scope(string): all 查询整个 bot；current_chat 只查当前群或会话。默认 all。
-            limit(number): 每个币种排行和未知费用名单最多返回多少人，整数，默认 10，范围 1～50。
         """
         try:
             self.pricing.bind_providers(self.context.get_all_providers())
@@ -128,16 +117,7 @@ class UsageInsight(Star):
                 prices_from_json(self.config.get("prices_json", "[]")),
                 self.pricing,
                 days=days,
-                person=person,
-                scope=scope,
-                origin=str(event.unified_msg_origin or ""),
-                viewer=event_identity(event),
-                limit=limit,
                 timezone=self._timezone(),
-            )
-            result.update(
-                collecting=bool(self.config.get("enabled", True)),
-                import_status=self.import_status,
             )
         except ValueError as exc:
             result = {"ok": False, "error": "invalid_query", "message": str(exc)}

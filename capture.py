@@ -240,7 +240,32 @@ class Collector:
                 )
                 collector._done()
 
-        self._patch(cls, name, streaming if name == "text_chat_stream" else regular)
+        if name == "text_chat_stream":
+            self._patch(cls, name, streaming)
+        else:
+
+            @functools.wraps(original)
+            def capture_call(provider, *args, **kwargs):
+                # Capture LCM's worker before wait_for moves execution to a child task.
+                if collector.stopped or not collector.enabled() or DEPTH.get():
+                    return regular(provider, *args, **kwargs)
+                found = caller_metadata()
+                if found["kind"] != "compression":
+                    return regular(provider, *args, **kwargs)
+
+                async def compression_call():
+                    token = BOUND.set(found)
+                    try:
+                        return await regular(provider, *args, **kwargs)
+                    finally:
+                        BOUND.reset(token)
+
+                return compression_call()
+
+            marker = getattr(inspect, "markcoroutinefunction", None)
+            if marker is not None:
+                marker(capture_call)
+            self._patch(cls, name, capture_call)
 
     def wrap_http(self, original):
         collector = self

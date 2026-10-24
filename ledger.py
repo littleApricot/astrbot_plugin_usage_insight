@@ -16,6 +16,7 @@ KINDS = {
     "reply": "正式回复",
     "decision": "回复判断",
     "memory": "记忆整理",
+    "compression": "上下文压缩",
     "recognition": "图片识别",
     "other": "其他调用",
     "history": "宿主历史",
@@ -319,7 +320,9 @@ class Ledger:
                 [row["actor"]] if row.get("actor") else []
             )
             persons = (
-                participants
+                []
+                if row["kind"] == "compression"
+                else participants
                 if attribution == "participants"
                 else ([row["actor"]] if row.get("actor") else [])
             )
@@ -327,7 +330,7 @@ class Ledger:
                 ("__history__", "宿主历史（未记录用户）")
                 if row["kind"] == "history"
                 else ("__background__", "后台公共开销")
-                if row["kind"] in ("memory", "recognition")
+                if row["kind"] in ("memory", "recognition", "compression")
                 else ("", "未识别触发者")
             )
             if actor == "__shared__":

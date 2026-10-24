@@ -138,6 +138,14 @@ def caller_metadata():
             values = frame.f_locals
             if "astrbot_plugin_reply_gate" in module:
                 result["kind"] = "decision"
+            elif "astrbot_plugin_lcm" in module and frame.f_code.co_name == "work":
+                scope = values.get("scope", {})
+                return {
+                    "kind": "compression",
+                    "origin": str(scope.get("origin", "")),
+                    "actor": None,
+                    "participants": [],
+                }
             elif (
                 "astrbot_plugin_self_prompt" in module
                 and frame.f_code.co_name == "_summarize"
