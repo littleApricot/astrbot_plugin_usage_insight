@@ -252,6 +252,7 @@ def test_native_registered_tool_uses_selected_provider_and_shared_service(tmp_pa
         event = SimpleNamespace(
             get_extra=lambda name: "official", unified_msg_origin="synthetic-group"
         )
+        plugin.ledger.put(usage_row("", ts=datetime.now(timezone.utc).timestamp()))
         try:
             tool = llm_tools.get_func("get_self_balance")
             assert (
@@ -276,10 +277,50 @@ def test_native_registered_tool_uses_selected_provider_and_shared_service(tmp_pa
                     result["local_usage_scope"] == "current_key_this_astrbot"
                     and result["local_usage_days"] == 7
                 )
+                assert result["balance_scope"] == "account"
+                assert result["other_app_usage"]["state"] == "unknown"
+                assert result["other_app_usage"]["cost"] is None
+                assert result["local_untagged_records"] == 1
+                assert result["local_usage"]["calls"] == 0
                 context.get_using_provider_async.assert_not_awaited()
                 query.assert_awaited_once()
         finally:
             await plugin.terminate()
+
+    asyncio.run(run())
+
+
+def test_account_balance_change_does_not_invent_external_spending(tmp_path):
+    async def run():
+        monitor = monitor_at(tmp_path)
+        try:
+            ref = monitor.credential_ref(provider())
+            monitor.ledger.put(usage_row(ref))
+            with patch(
+                "astrbot_plugin_usage_insight.balances.query_deepseek_balance",
+                new_callable=AsyncMock,
+                side_effect=[balance("20.00"), balance("10.00")],
+            ):
+                await monitor.query(provider())
+                monitor.cache.clear()
+                await monitor.query(provider())
+            report = monitor.report({ref: ["official"]}, one_yuan_rules(), days=0)
+            group = report["groups"][0]
+            assert group["latest"]["balance_infos"][0]["total_balance"] == "10.00"
+            assert group["local_usage"]["cost"]["CNY"] == 1
+            external = group["other_app_usage"]
+            assert external["scope"] == "other_applications_same_account"
+            assert external["state"] == "unknown"
+            assert all(
+                external[field] is None
+                for field in ("calls", "input", "output", "cached", "cost")
+            )
+            assert (
+                monitor.ledger.db.execute("SELECT count(*) FROM receipts").fetchone()[0]
+                == 1
+            )
+        finally:
+            monitor.ledger.close()
 
     asyncio.run(run())
 

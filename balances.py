@@ -31,6 +31,19 @@ def supported(provider):
         return False
 
 
+def other_app_usage():
+    return {
+        "scope": "other_applications_same_account",
+        "state": "unknown",
+        "calls": None,
+        "input": None,
+        "output": None,
+        "cached": None,
+        "cost": None,
+        "reason": "outside_this_astrbot",
+    }
+
+
 class BalanceMonitor:
     def __init__(self, context, ledger, config, pricing):
         self.context, self.ledger, self.config = context, ledger, config
@@ -207,6 +220,7 @@ class BalanceMonitor:
                     "latest": snapshots[0] if snapshots else None,
                     "last_error": (errors or {}).get(ref),
                     "local_usage": finish(usage),
+                    "other_app_usage": other_app_usage(),
                     "untagged_records": untagged,
                 }
             )

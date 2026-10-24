@@ -5,16 +5,19 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
 from astrbot.api import AstrBotConfig
+from astrbot.api.star import Context
 from astrbot.api.web import PluginRequest, bind_request_context
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.provider.entities import LLMResponse, TokenUsage
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
+from astrbot.dashboard.api.plugins import _match_registered_web_api
 from astrbot_plugin_usage_insight.accounting import (
     StreamUsage,
     receipt,
@@ -303,6 +306,57 @@ def test_concurrent_event_contexts_and_stale_background_scope(tmp_path):
     asyncio.run(run())
 
 
+def test_reload_removes_retired_api_handlers_from_native_router(tmp_path):
+    registered = []
+    context = SimpleNamespace(
+        registered_web_apis=registered,
+        get_all_providers=lambda: [],
+        get_config=lambda: {"timezone": "Asia/Shanghai"},
+    )
+    context.register_web_api = partial(Context.register_web_api, context)
+
+    async def old_handler():
+        raise AssertionError("Removed handlers must never run")
+
+    for path in (
+        "astrbot_plugin_usage_insight/official_preview",
+        "astrbot_plugin_usage_insight/official_reconcile",
+        "other_plugin/official_preview",
+    ):
+        context.register_web_api("/" + path, old_handler, ["GET", "POST"], "old")
+    with patch(
+        "astrbot_plugin_usage_insight.main.StarTools.get_data_dir",
+        return_value=tmp_path,
+    ):
+        plugin = UsageInsight(
+            context, AstrBotConfig(str(tmp_path / "config.json"), schema={})
+        )
+    try:
+        assert context.registered_web_apis is registered
+        for path in ("official_preview", "official_reconcile"):
+            for method in ("GET", "POST"):
+                assert (
+                    _match_registered_web_api(
+                        registered, "astrbot_plugin_usage_insight/" + path, method
+                    )
+                    is None
+                )
+        assert (
+            _match_registered_web_api(
+                registered, "other_plugin/official_preview", "POST"
+            )[0]
+            is old_handler
+        )
+        assert (
+            _match_registered_web_api(
+                registered, "astrbot_plugin_usage_insight/balances", "GET"
+            )[0].__self__
+            is plugin
+        )
+    finally:
+        asyncio.run(plugin.terminate())
+
+
 def test_api_prices_report_and_error_rollback(tmp_path):
     routes = {}
 
@@ -321,6 +375,7 @@ def test_api_prices_report_and_error_rollback(tmp_path):
         return_value=tmp_path,
     ):
         plugin = UsageInsight(context, config)
+    assert set(routes) == {"report", "prices", "refresh_prices", "balances"}
     plugin.ledger.put(row())
     app = FastAPI()
 

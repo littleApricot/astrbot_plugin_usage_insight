@@ -21,7 +21,6 @@ from .balances import BalanceMonitor
 from .capture import Collector
 from .ledger import KINDS, Ledger, prices_from_json
 from .pricing import PricingCatalog
-from .reconciliation import Reconciliations, compare, preview
 
 
 class UsageInsight(Star):
@@ -42,17 +41,22 @@ class UsageInsight(Star):
         self._import_task = None
         self._pricing_task = None
         self.balances = BalanceMonitor(context, self.ledger, config, self.pricing)
-        self.reconciliations = Reconciliations(self.ledger)
         self.collector.balance_scope = self.balances.credential_ref
         self._balance_task = None
         self.import_status = "pending"
+        # AstrBot 4.29.1 keeps registered APIs across plugin reloads.
+        apis = getattr(context, "registered_web_apis", None)
+        if isinstance(apis, list):
+            retired = {
+                "/astrbot_plugin_usage_insight/official_preview",
+                "/astrbot_plugin_usage_insight/official_reconcile",
+            }
+            apis[:] = [api for api in apis if api[0] not in retired]
         for path, handler, methods in (
             ("report", self.api_report, ["GET"]),
             ("prices", self.api_prices, ["GET", "POST"]),
             ("refresh_prices", self.api_refresh_prices, ["POST"]),
             ("balances", self.api_balances, ["GET", "POST"]),
-            ("official_preview", self.api_official_preview, ["POST"]),
-            ("official_reconcile", self.api_official_reconcile, ["GET", "POST"]),
         ):
             context.register_web_api(
                 "/astrbot_plugin_usage_insight/" + path,
@@ -78,6 +82,10 @@ class UsageInsight(Star):
         金额是 checked_at 时刻的快照，后续模型调用可能改变余额。
         local_usage 是最近 7 天当前 Key 在此 AstrBot 中采集到的用量和费用
         估算，不包含其他程序的调用，不是该 Key 的官方账单。
+        other_app_usage 是同账号其他应用的消耗，state=unknown 且数值为 null；
+        本插件无法观测这些请求，不能把未知解释为零，也不能用余额差推算。
+        local_untagged_records 是本 bot 同提供商中缺少 Key 标记的旧记录数，
+        这部分没有纳入当前 Key 的 local_usage，不能归成其他应用消耗。
         """
         try:
             selected = event.get_extra("selected_provider")
@@ -107,6 +115,9 @@ class UsageInsight(Star):
                         local_usage=view["groups"][0]["local_usage"],
                         local_usage_scope="current_key_this_astrbot",
                         local_usage_days=7,
+                        balance_scope="account",
+                        other_app_usage=view["groups"][0]["other_app_usage"],
+                        local_untagged_records=view["groups"][0]["untagged_records"],
                     )
             except Exception:
                 result["local_usage_error"] = "local_usage_unavailable"
@@ -294,68 +305,6 @@ class UsageInsight(Star):
             )
         except (ValueError, TypeError, json.JSONDecodeError):
             return error_response("价格规则无效，请检查插件配置", status_code=400)
-
-    async def api_official_preview(self):
-        try:
-            payload = await request.json()
-            if not isinstance(payload, dict):
-                raise ValueError("请提交 CSV 或 ZIP 文件")
-            return json_response(await asyncio.to_thread(preview, payload))
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        except Exception:
-            return error_response(
-                "无法预览文件，请检查 CSV 或 ZIP 格式", status_code=400
-            )
-
-    async def api_official_reconcile(self):
-        try:
-            targets = self.balances.targets()
-            if request.method != "POST":
-                return json_response(
-                    {
-                        "reports": await asyncio.to_thread(self.reconciliations.recent),
-                        "providers": [
-                            identifier
-                            for target in targets.values()
-                            for identifier in target["provider_ids"]
-                        ],
-                        "timezone": self._timezone(),
-                    }
-                )
-            payload = await request.json()
-            if not isinstance(payload, dict):
-                raise ValueError("请提交文件及核对范围")
-            identifier = payload.get("provider_id")
-            ref, target = next(
-                (
-                    (ref, target)
-                    for ref, target in targets.items()
-                    if identifier in target["provider_ids"]
-                ),
-                (None, None),
-            )
-            if not ref:
-                raise ValueError("请选择已配置 Key 的 DeepSeek 官方提供商")
-            self.pricing.bind_providers(self.context.get_all_providers())
-            result = await asyncio.to_thread(
-                compare,
-                payload,
-                self.ledger,
-                ref,
-                target["provider_ids"],
-                self.balances.salt,
-                prices_from_json(self.config.get("prices_json", "[]")),
-                self.pricing,
-                self._timezone(),
-            )
-            # Persist only the sanitized summary, never uploaded rows or file bytes.
-            self.reconciliations.save(result)
-            return json_response(result)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        except Exception:
-            return error_response("核对失败，请检查文件格式后重试", status_code=400)
 
     async def terminate(self):
         if self._balance_task is not None:
