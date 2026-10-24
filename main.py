@@ -17,10 +17,12 @@ from astrbot.core import db_helper
 from astrbot.core.db.po import ProviderStat
 from sqlmodel import select
 
+from .accounting import event_identity
 from .balances import BalanceMonitor
 from .capture import Collector
 from .ledger import KINDS, Ledger, prices_from_json
 from .pricing import PricingCatalog
+from .usage_tool import brief, query_usage
 
 
 class UsageInsight(Star):
@@ -80,8 +82,8 @@ class UsageInsight(Star):
         只有 ok=true 才查到了余额，失败表示未知，不能解释为零。
         余额属于整个账户，同账户的其他机器人和程序也会消耗它。
         金额是 checked_at 时刻的快照，后续模型调用可能改变余额。
-        local_usage 是最近 7 天当前 Key 在此 AstrBot 中采集到的用量和费用
-        估算，不包含其他程序的调用，不是该 Key 的官方账单。
+        local_usage 只含近 7 天当前 Key 在本 bot 中采集的总 tokens、cost 和
+        完整性状态，金额是估算。更详细的按时间、按人和排行查询用 get_usage_stats。
         other_app_usage 是同账号其他应用的消耗，state=unknown 且数值为 null；
         本插件无法观测这些请求，不能把未知解释为零，也不能用余额差推算。
         local_untagged_records 是本 bot 同提供商中缺少 Key 标记的旧记录数，
@@ -112,15 +114,72 @@ class UsageInsight(Star):
                         timezone=self._timezone(),
                     )
                     result.update(
-                        local_usage=view["groups"][0]["local_usage"],
+                        local_usage=brief(view["groups"][0]["local_usage"]),
                         local_usage_scope="current_key_this_astrbot",
                         local_usage_days=7,
                         balance_scope="account",
-                        other_app_usage=view["groups"][0]["other_app_usage"],
+                        other_app_usage={
+                            "state": "unknown",
+                            "tokens": None,
+                            "cost": None,
+                        },
                         local_untagged_records=view["groups"][0]["untagged_records"],
                     )
             except Exception:
                 result["local_usage_error"] = "local_usage_unavailable"
+        return json.dumps(result, ensure_ascii=False)
+
+    @filter.llm_tool(name="get_usage_stats")
+    async def get_usage_stats(
+        self,
+        event: AstrMessageEvent,
+        days: int = 7,
+        person: str = "",
+        scope: str = "all",
+        limit: int = 10,
+    ) -> str:
+        """查询本 bot 最近花费、某个人的花费或个人花费排行。
+
+        返回总 token、费用估算和花费归属。
+        问今天、本周、最近花了多少、谁花得最多或某个人花费时调用此工具；
+        账户余额用 get_self_balance。默认近 7 天、整个 bot、按触发者归属。
+        日期按 bot 配置时区自然日计算，包含今天。金额按币种分别列出。
+        partial 是已知部分；unknown 或 no_records 不表示实际零花费。
+        同名返回候选 ID，确认对应用户后再查；其他应用花费始终未知。
+
+        Args:
+            days(number): 整数天数，默认 7；1 为今天、30 为近 30 天、0 为全部已采集数据，范围 0～36500。
+            person(string): 留空返回总花费及排行；指定昵称、原始用户 ID 或统计结果中的完整 ID 查询个人；me 表示本次消息发送者。
+            scope(string): all 查询整个 bot；current_chat 只查当前群或会话。默认 all。
+            limit(number): 每个币种排行和未知费用名单最多返回多少人，整数，默认 10，范围 1～50。
+        """
+        try:
+            self.pricing.bind_providers(self.context.get_all_providers())
+            result = await asyncio.to_thread(
+                query_usage,
+                self.ledger,
+                prices_from_json(self.config.get("prices_json", "[]")),
+                self.pricing,
+                days=days,
+                person=person,
+                scope=scope,
+                origin=str(event.unified_msg_origin or ""),
+                viewer=event_identity(event),
+                limit=limit,
+                timezone=self._timezone(),
+            )
+            result.update(
+                collecting=bool(self.config.get("enabled", True)),
+                import_status=self.import_status,
+            )
+        except ValueError as exc:
+            result = {"ok": False, "error": "invalid_query", "message": str(exc)}
+        except Exception:
+            result = {
+                "ok": False,
+                "error": "stats_unavailable",
+                "message": "本地统计暂时不可用，请稍后重试",
+            }
         return json.dumps(result, ensure_ascii=False)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize)

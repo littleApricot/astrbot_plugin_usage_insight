@@ -281,7 +281,12 @@ def test_native_registered_tool_uses_selected_provider_and_shared_service(tmp_pa
                 assert result["other_app_usage"]["state"] == "unknown"
                 assert result["other_app_usage"]["cost"] is None
                 assert result["local_untagged_records"] == 1
-                assert result["local_usage"]["calls"] == 0
+                assert result["local_usage"]["tokens"] is None
+                assert result["local_usage"]["cost_state"] == "no_records"
+                assert not any(
+                    key in json.dumps(result)
+                    for key in ("cache_rate", "input_ratio", "cost_parts")
+                )
                 context.get_using_provider_async.assert_not_awaited()
                 query.assert_awaited_once()
         finally:

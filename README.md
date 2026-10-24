@@ -1,6 +1,6 @@
 # 用量与费用明细
 
-为 AstrBot 4.29.1 增加用量、费用与官方余额页面，查看缓存命中、模型和个人用量、费用估算及账户余额。包含机器人 `get_self_balance` 工具，复用已有 DeepSeek 配置，无需新的 API Key。
+为 AstrBot 4.29.1 增加用量、费用与官方余额页面，查看缓存命中、模型和个人用量、费用估算及账户余额。机器人可用 `get_usage_stats` 查询近期或个人花费与排行，用 `get_self_balance` 查询账号余额；复用已有配置。
 
 ## 安装和打开
 
@@ -34,6 +34,7 @@ https://github.com/littleApricot/astrbot_plugin_usage_insight
 - DeepSeek 官方接口自动同步人民币价格，按请求时间区分高峰和空闲时段；支持可选的手动价格覆盖。
 - 分别列出未计价的原因，以及宿主历史、后台公共开销和未识别触发者的记录。
 - 官方账号余额、充值和赠金余额，以及当前 API Key 在此 AstrBot 中的独立用量与费用估算。
+- 机器人查询近期总 token、费用估算、指定群友花费和个人排行。
 
 ## 官方账号余额与本机 Key 用量
 
@@ -49,7 +50,7 @@ https://github.com/littleApricot/astrbot_plugin_usage_insight
 
 ### 机器人余额工具
 
-`get_self_balance` 无业务参数，查询当前会话所选提供商对应的账户。返回结构与原“自查余额”保持兼容：
+`get_self_balance` 无业务参数，查询当前会话所选提供商对应的账户。余额字段保留原结构，本机用量摘要只返回总 token、金额和完整性状态：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -65,15 +66,49 @@ https://github.com/littleApricot/astrbot_plugin_usage_insight
 | `topped_up_balance` | 每项的充值余额 |
 | `cached` | 是否复用了短期缓存，以 `checked_at` 判断快照时间 |
 | `snapshot_saved` | 可选，`false` 表示查到了真实余额，但本地快照保存失败 |
-| `local_usage` | 最近 7 天当前 Key 在此 AstrBot 中采集的用量、计价覆盖数和费用估算，与账号余额分开 |
+| `local_usage` | 最近 7 天当前 Key 在本 bot 中的摘要：`tokens` 总 token、`cost` 按币种的估算金额、`tokens_state` 和 `cost_state` 完整性状态；状态定义见下文 |
 | `local_usage_scope` | `current_key_this_astrbot`，仅覆盖本机当前 Key 的调用 |
 | `local_usage_days` | 统计窗口，目前为 7 天 |
 | `local_untagged_records` | 本 bot 同提供商缺少 Key 标记的旧记录数；未计入当前 Key 用量，归属未知，不是其他应用 |
 | `balance_scope` | `account`，余额属于整个账户 |
-| `other_app_usage` | 同账号其他应用消耗：`scope=other_applications_same_account`、`state=unknown`，`calls/input/output/cached/cost` 均为 `null`，`reason=outside_this_astrbot`；未知不表示零 |
+| `other_app_usage` | 同账号其他应用消耗：`state=unknown`，`tokens/cost` 均为 `null`；未知不表示零 |
 | `local_usage_error` | 可选，本机用量读取失败时的安全错误代码，不改变余额查询结果 |
 
-金额保留官方十进制字符串。Key 不作为工具参数或结果交给模型；失败时返回安全错误代码，避免把原始响应和异常交给模型。工具结果由 AstrBot 正常记录在工具往返中。
+账号余额保留官方十进制字符串。Key 不作为工具参数或结果交给模型；失败时返回安全错误代码，避免把原始响应和异常交给模型。工具结果由 AstrBot 正常记录在工具往返中。
+
+### 机器人花费查询工具
+
+更新至 v0.6.0 后，模型可调用 `get_usage_stats`。可以直接问“今天总共用了多少 token、花了多少钱”“小幸最近 7 天花了多少”“我最近 30 天的花费”“看看本群最近谁花得最多”。需要在当前模型工具配置中允许使用 `get_usage_stats`，模型自行选择是否调用；查账号余额仍使用 `get_self_balance`。
+
+工具复用网页“按触发者”的统计与价格：一次触发产生的整轮上下文开销归给触发者。默认查整个 bot 近 7 天的已采集记录，覆盖本机所有已采集提供商、模型和 Key；可指定当前群或会话。它与余额工具中“当前 Key”的近 7 天用量范围不同。查询在本地线程中读取统计库，不查询官方余额或调用生成模型；当前这轮尚未完成的调用会在采集完成后计入。
+
+工具只把总 token、估算金额和归属交给模型。金额按币种分别汇总；个人排行按该币种已估算金额降序，同金额并列。无法计价的人单列，公共开销、宿主历史和未识别触发者也单列，均不冒充某个人。其他应用的花费保持未知。
+
+昵称或 ID 在所选时间与会话范围内匹配：优先完整统计 ID、原始用户 ID、完整昵称，再尝试唯一昵称片段。同名或多个匹配返回候选 ID，确认对应用户后重查；没有找到记录时明确返回错误，不猜测身份。`me` 直接使用本次消息发送者的身份。
+
+| 入参 | 默认值 | 含义 |
+| --- | --- | --- |
+| `days` | 7 | 整数天数，范围 0～36500；1 为今天、30 为近 30 天、0 为全部已采集数据；按 bot 时区自然日计算，包含今天 |
+| `person` | 空字符串 | 留空返回总花费和排行；指定昵称、原始用户 ID、统计结果中的完整 ID 查询个人，`me` 表示当前消息发送者 |
+| `scope` | `all` | `all` 为整个 bot；`current_chat` 为当前群或会话 |
+| `limit` | 10 | 每币种排行和无法计价名单的返回人数上限，整数，范围 1～50 |
+
+| 返回字段 | 含义 |
+| --- | --- |
+| `ok` | 是否成功；失败时返回 `error/message`，不编造统计结果 |
+| `days/timezone/scope` | 本次查询的时间和会话范围 |
+| `data_scope/money_kind/attribution` | 固定为 `this_astrbot/estimate/trigger`，仅此 bot、费用估算、按触发者归属 |
+| `summary` | `tokens` 总 token、`cost` 按币种的金额字典、`tokens_state/cost_state` 完整性状态 |
+| `person` | 个人查询时返回匹配的 `id/name`；个人查询不返回排行榜 |
+| `rankings` | 全体查询时按币种返回 `people_total/entries`；每项含 `rank/id/name/tokens/amount/cost_state/tokens_state`，金额单位由币种确定 |
+| `people_without_priced_cost/people_without_priced_cost_total` | 全体查询时无法计价的人及总人数；名单受 `limit` 限制，每项含 `id/name` 和同结构的 token、金额与状态 |
+| `unattributed` | 全体查询时公共、历史或未知归属部分的摘要，含 `id/name` 和同结构的 token、金额与状态；包含在总计中，排除个人排行 |
+| `other_app_usage` | 全体查询时返回其他应用消耗：`state=unknown`，`tokens/cost=null` |
+| `candidates/candidates_total` | 多个匹配时的候选 `id/name` 及候选总数；至多返回 20 项，错误代码为 `ambiguous_person` |
+| `collecting/import_status` | 当前采集开关及宿主历史导入状态；关闭采集时仍可查询已有记录 |
+| `note` | 范围、归属和未知数据的必要说明 |
+
+`tokens_state=reported` 表示该范围记录均有接口用量，`cost_state=estimated` 表示均能估价。两者都可能为 `partial`（仅有一部分）、`unknown`（全部缺失）或 `no_records`（没有采集记录）。没有任何已报告用量时 `tokens=null`；没有可估价金额时 `cost={}`。这些状态不能解释为实际零消费；显式配置免费价格且有有效用量时，金额可以是零。网页继续提供缓存率、输入输出和调用明细。
 
 ## 用量与费用口径
 
@@ -160,6 +195,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ASTRBOT_SOURCE:$PWD/.." \
 自动检查覆盖原始缓存字段、未知值、费用公式、分母、按人分摊、共享费用、实际宿主统计表的历史导入与去重、配置保存、流式汇总、并发事件归属、直连判断采集、统计写入失败隔离和卸载恢复。价格检查覆盖峰谷边界、周末、节假日、调休周末、未知年份、自动价与手动覆盖、价格快照、同步失败和缓存恢复。实际运行 AstrBot OpenAI 适配器并模拟 SDK 返回，以检查复制 Provider 和 `wait_for` 任务路径中的采集。测试不调用付费模型、不发 QQ 消息。
 
 余额检查使用真实 HTTPX 请求构造和模拟官方响应，检查官方目标与鉴权、安全字段、错误处理、原生工具注册、工具与页面共用缓存、重复 Key 去重、凭据切换、当前 Key 归集、其他 Key 排除和历史未归集记录。页面检查覆盖余额展示、主动刷新以及本 bot 与其他应用的范围区分；余额发生变化时，其他应用消耗仍保持未知。合并版验证没有额外查询真实账户余额，安装后由正常工具或自动采样请求读取。
+
+花费工具检查使用虚构采集记录，经过 AstrBot 原生工具注册和执行器调用，验证总金额与网页同口径、按人查询、昵称歧义、按金额排行、币种隔离、自然日边界、公共开销与未知数据，以及模型结果只含简要统计。未调用付费模型验证自然语言触发，也未发送 QQ 消息。
 
 `tests/check_page_offline.mjs` 通过进程管道调用真实 API 处理函数，并使用独立临时配置的无头 Chrome 检查筛选、价格保存、归因、分页及窄屏显示，无需监听端口，不连接用户已有浏览器配置。它通过 `tests/ui_rpc.py` 使用临时数据库和虚构数据。`tests/ui_server.py` 和 `tests/check_ui.mjs` 另提供本机 HTTP 测试方式。
 
