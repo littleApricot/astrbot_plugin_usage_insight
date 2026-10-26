@@ -128,7 +128,8 @@ def test_cny_amounts_do_not_convert_or_mislabel_other_currencies(setup):
     add("u3", "非人民币记录", "usd", 100000)
     add("u4", "免费", "free", 100000)
     result = query(setup)
-    assert result["total_cost"] is None
+    assert result["total_cost"] == 3
+    assert result["incomplete"] == ["cost"]
     assert (
         next(p for p in result["people"] if p["name"] == "非人民币记录")["cost"] is None
     )
@@ -136,19 +137,98 @@ def test_cny_amounts_do_not_convert_or_mislabel_other_currencies(setup):
     assert "USD" not in json.dumps(result)
 
 
-def test_incomplete_own_data_returns_null_instead_of_zero_or_partial_totals(setup):
+def test_partial_totals_keep_known_values_and_mark_missing_fields(setup):
     _, _, add = setup
     add("u3", "未知价格", "no-price", 500000)
     add("u4", "未知用量", usage=None)
     add("u1", "小幸", "no-price", 10)
     result = query(setup)
-    assert result["total_cost"] is None and result["total_tokens"] is None
+    assert result["total_cost"] == 3 and result["total_tokens"] == 1600010
+    assert result["incomplete"] == ["tokens", "cost"]
+    assert "failed_without_usage" not in result
     people = {p["name"]: p for p in result["people"]}
     assert people["未知价格"]["tokens"] == 500000
     assert people["未知价格"]["cost"] is None
+    assert people["未知价格"]["incomplete"] == ["cost"]
     assert people["未知用量"]["tokens"] is None
-    assert people["小幸"]["cost"] is None
+    assert people["未知用量"]["cost"] is None
+    assert people["未知用量"]["incomplete"] == ["tokens", "cost"]
+    assert people["小幸"]["cost"] == 1
+    assert people["小幸"]["incomplete"] == ["cost"]
     assert result["people"][0]["name"] == "测试乙"
+
+
+def test_codex_and_bailian_are_excluded_only_from_tool_report(setup):
+    plugin, _, add = setup
+    for provider, kind in (
+        ("codex-cli", "recognition"), ("bailian-decision", "decision")
+    ):
+        for status in ("completed", "error"):
+            add(
+                "excluded", "排除来源", provider=provider, kind=kind,
+                status=status, usage=None,
+            )
+    # The same purposes through other providers remain billable.
+    add(kind="recognition", tokens=200000)
+    add(kind="decision", tokens=300000)
+    result = query(setup)
+    assert result["total_tokens"] == 1600000
+    assert result["total_cost"] == pytest.approx(3.5)
+    assert "incomplete" not in result and "failed_without_usage" not in result
+    assert len(result["people"]) == 2
+    assert next(p for p in result["people"] if p["name"] == "小幸")["cost"] == 1.5
+    page = plugin.ledger.report(prices_from_json(plugin.config["prices_json"]))
+    assert page["count"] == 8
+    assert page["summary"]["failed_without_usage"] == 2
+
+
+def test_failures_keep_known_totals_and_mark_affected_members(setup):
+    _, _, add = setup
+    for status, error in (
+        ("error", "BadRequestError"),
+        ("error", "APITimeoutError"),
+        ("cancelled", "CancelledError"),
+    ):
+        add(status=status, error=error, usage=None)
+    # A failed request with an actual usage receipt still contributes its known cost.
+    add(status="error", tokens=1500000)
+    result = query(setup)
+    assert result["total_tokens"] == 2600000
+    assert result["total_cost"] == 4.5
+    assert result["incomplete"] == ["tokens", "cost"]
+    assert result["failed_without_usage"] == 3
+    assert result["people"] == [
+        {
+            "name": "小幸", "tokens": 2500000, "cost": 2.5,
+            "incomplete": ["tokens", "cost"], "failed_without_usage": 3,
+        },
+        {"name": "测试乙", "tokens": 100000, "cost": 2},
+    ]
+
+
+def test_all_unknown_usage_is_not_reported_as_free(setup):
+    plugin, _, add = setup
+    plugin.ledger.db.execute("DELETE FROM receipts")
+    plugin.ledger.db.commit()
+    add(status="cancelled", usage=None)
+    result = query(setup)
+    assert result["total_tokens"] is None and result["total_cost"] is None
+    assert result["incomplete"] == ["tokens", "cost"]
+    assert result["failed_without_usage"] == 1
+
+
+def test_failed_compression_marks_total_and_compression_only(setup):
+    _, _, add = setup
+    add(kind="compression", tokens=200000)
+    add(kind="compression", status="error", usage=None)
+    result = query(setup)
+    assert result["total_cost"] == pytest.approx(3.2)
+    assert result["failed_without_usage"] == 1
+    assert result["compression"] == {
+        "tokens": 200000, "cost": 0.2,
+        "incomplete": ["tokens", "cost"], "failed_without_usage": 1,
+    }
+    assert all("incomplete" not in person for person in result["people"])
 
 
 def test_compression_is_in_total_but_not_charged_to_a_person(setup):

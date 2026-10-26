@@ -3,18 +3,31 @@
 from __future__ import annotations
 
 
+EXCLUDED_SOURCES = frozenset(
+    {("codex-cli", "recognition"), ("bailian-decision", "decision")}
+)
+
+
 def totals(bucket):
     if not bucket["records"]:
         return {"tokens": 0, "cost": 0}
-    return {
-        "tokens": bucket["total"]
-        if bucket["usage_count"] == bucket["records"]
-        else None,
-        "cost": bucket["cost"].get("CNY")
-        if bucket["priced_count"] == bucket["records"]
-        and set(bucket["cost"]) == {"CNY"}
-        else None,
+    result = {
+        "tokens": bucket["total"] if bucket["usage_count"] else None,
+        "cost": bucket["cost"].get("CNY"),
     }
+    incomplete = [
+        field
+        for field, count in (
+            ("tokens", bucket["usage_count"]),
+            ("cost", bucket["cny_priced_count"]),
+        )
+        if count < bucket["records"]
+    ]
+    if incomplete:
+        result["incomplete"] = incomplete
+    if bucket["failed_without_usage"]:
+        result["failed_without_usage"] = bucket["failed_without_usage"]
+    return result
 
 
 def query_usage(ledger, rules, catalog, *, days, timezone):
@@ -27,6 +40,7 @@ def query_usage(ledger, rules, catalog, *, days, timezone):
         attribution="trigger",
         limit=1,
         catalog=catalog,
+        excluded_sources=EXCLUDED_SOURCES,
     )
     people = [
         {"name": person["name"], **totals(person), "_id": person["id"]}
@@ -44,8 +58,9 @@ def query_usage(ledger, rules, catalog, *, days, timezone):
     )
     summary = totals(report["summary"])
     result = {
-        "total_tokens": summary["tokens"],
-        "total_cost": summary["cost"],
+        "total_tokens": summary.pop("tokens"),
+        "total_cost": summary.pop("cost"),
+        **summary,
         "people": [
             {key: value for key, value in person.items() if key != "_id"}
             for person in people

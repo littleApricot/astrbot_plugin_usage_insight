@@ -150,6 +150,8 @@ def empty_bucket(name="", identifier=""):
         "cache_input": 0,
         "usage_count": 0,
         "priced_count": 0,
+        "cny_priced_count": 0,
+        "failed_without_usage": 0,
         "records": 0,
         "duration_total": 0,
         "cost": {},
@@ -164,6 +166,8 @@ def add(bucket, row, cost, weight=1):
     bucket["errors"] += weight * (row["status"] not in ("completed", "success"))
     bucket["duration_total"] += row["duration"] * weight
     usage = row["usage"]
+    if usage is None and row["status"] not in ("completed", "success"):
+        bucket["failed_without_usage"] += weight
     if usage is not None:
         bucket["usage_count"] += weight
         bucket["input"] += usage["input"] * weight
@@ -174,6 +178,8 @@ def add(bucket, row, cost, weight=1):
     if cost is not None:
         bucket["priced_count"] += weight
         currency = cost["currency"]
+        if currency == "CNY":
+            bucket["cny_priced_count"] += weight
         bucket["cost"][currency] = (
             bucket["cost"].get(currency, 0) + cost["total"] * weight
         )
@@ -274,6 +280,7 @@ class Ledger:
         offset=0,
         limit=50,
         catalog=None,
+        excluded_sources=(),
     ):
         if attribution not in ("trigger", "participants"):
             raise ValueError("归因方式无效")
@@ -316,6 +323,8 @@ class Ledger:
             params,
         ):
             row = json.loads(data)
+            if (row["provider"], row["kind"]) in excluded_sources:
+                continue
             participants = row.get("participants") or (
                 [row["actor"]] if row.get("actor") else []
             )
